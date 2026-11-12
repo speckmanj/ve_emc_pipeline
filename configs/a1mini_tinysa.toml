@@ -1,0 +1,76 @@
+# Job file template: Bambu A1 mini + TinySA Ultra + TekBox TBPS01.
+# Copy this file into jobs/ for each board (one file per job), then edit it.
+# Units: mm, seconds, Hz, dBm. Anything left out falls back to emcscan/config.py.
+
+[job]
+name = "customer_board"
+photo_rectified = ""            # filled in by: emcscan photo <this file> <photo.jpg>
+
+[plate]                         # must match the printed spacer_plate.stl
+width = 150.0
+depth = 150.0
+height = 12.0                   # nominal; calibration measures the real value
+marker_size = 20.0
+marker_border = 3.0
+marker_inset = 4.0
+pocket_depth = 0.4
+
+[board]
+thickness = 1.6
+tallest_part = 3.0              # tallest component on the board (measure!)
+
+[probe]
+name = "H10"                    # H20 / H10 / H5 / E5
+orientation = "x"               # "x" with probe_mount_x, "y" with probe_mount_y
+offset_z = 3.0                  # probe tip above nozzle tip, set with the printed gauge
+
+[printer]
+type = "bambu_mqtt"
+host = "192.168.1.XXX"          # printer screen: Settings > Network
+serial = "XXXXXXXXXXXXXXX"      # printer screen: Settings > Device
+access_code = "XXXXXXXX"        # printer screen: Settings > LAN Only mode
+bed_x = 180.0
+bed_y = 180.0
+z_max = 150.0
+safe_z = 40.0
+feed_xy = 3000.0
+feed_z = 600.0
+accel = 500.0
+settle_s = 0.15
+
+[calibration]                   # written by: emcscan calibrate <this file>
+origin_x = 90.0
+origin_y = 90.0
+angle_deg = 0.0
+
+[scan]                          # plate frame: origin = center of marker 0 (front-left)
+x_min = 10.0                    # set by: emcscan photo <this file> <photo.jpg> --pick
+x_max = 60.0
+y_min = 10.0
+y_max = 60.0
+step = 2.0
+heights = [7.0]                 # probe tip above the board top; minimum is shown by `emcscan plan`
+clearance = 1.0
+
+[analyzer]
+type = "tinysa"
+port = "auto"
+rbw_khz = "auto"
+lna = "auto"                    # auto | on | off
+lna_threshold_dbm = -40.0
+overload_dbm = -30.0
+
+[[analyzer.bands]]
+name = "30-300 MHz"
+start_hz = 30e6
+stop_hz = 300e6
+points = 450
+
+[[analyzer.bands]]
+name = "300-1000 MHz"
+start_hz = 300e6
+stop_hz = 1000e6
+points = 450
+
+[output]
+runs_dir = "../runs"

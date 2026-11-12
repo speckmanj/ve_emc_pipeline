@@ -1,0 +1,76 @@
+# Simulated job: no printer, no TinySA. Used by `emcscan demo` and the tests.
+
+[job]
+name = "demo_before_fix"
+photo_rectified = "../jobs/demo_photo.png"
+
+[board]
+thickness = 1.6
+tallest_part = 3.0
+
+[probe]
+name = "H10"
+offset_z = 3.0
+
+[printer]
+type = "sim"
+
+[calibration]
+origin_x = 40.0
+origin_y = 30.0
+angle_deg = 0.0
+
+[scan]
+x_min = 10.0
+x_max = 70.0
+y_min = 20.0
+y_max = 70.0
+step = 2.0
+heights = [7.0, 12.0]
+
+[analyzer]
+type = "sim"
+lna = "auto"
+
+[[analyzer.bands]]
+name = "30-300 MHz"
+start_hz = 30e6
+stop_hz = 300e6
+points = 450
+
+[[analyzer.bands]]
+name = "300-1000 MHz"
+start_hz = 300e6
+stop_hz = 1000e6
+points = 450
+
+[sim]
+time_scale = 0.0
+noise_floor_dbm = -95.0
+
+[[sim.sources]]                 # "buck converter switch node"
+x = 25.0
+y = 35.0
+freq_hz = 37.5e6
+harmonics = 6
+level_dbm = -45.0
+size_mm = 4.0
+
+[[sim.sources]]                 # "MCU crystal"
+x = 52.0
+y = 58.0
+freq_hz = 48e6
+harmonics = 12
+level_dbm = -55.0
+size_mm = 2.5
+
+[[sim.sources]]                 # "USB data lines"
+x = 64.0
+y = 30.0
+freq_hz = 480e6
+harmonics = 1
+level_dbm = -62.0
+size_mm = 3.0
+
+[output]
+runs_dir = "../runs"

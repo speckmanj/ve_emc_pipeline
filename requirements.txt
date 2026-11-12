@@ -1,0 +1,8 @@
+numpy
+matplotlib
+pyvista
+opencv-python
+pyserial
+paho-mqtt
+manifold3d
+trimesh

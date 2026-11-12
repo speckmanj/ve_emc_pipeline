@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emcscan"
+version = "0.1.0"
+description = "Valence near-field EMC scanner: printer gantry + TinySA Ultra, live 3D view, heat maps and reports"
+requires-python = ">=3.11"
+dependencies = ["numpy", "matplotlib", "pyvista", "opencv-python", "pyserial", "paho-mqtt", "manifold3d", "trimesh"]
+
+[project.scripts]
+emcscan = "emcscan.cli:main"
+
+[tool.setuptools]
+packages = ["emcscan"]
