@@ -77,7 +77,9 @@ DEFAULTS: dict = {
         "overload_dbm": -30.0,      # with LNA on, readings above this are flagged
         "bands": [
             {"name": "30-300 MHz", "start_hz": 30e6, "stop_hz": 300e6, "points": 450},
-            {"name": "300-1000 MHz", "start_hz": 300e6, "stop_hz": 1000e6, "points": 450},
+            # split at 800 MHz: the TinySA Ultra noise floor steps down ~8 dB there
+            {"name": "300-800 MHz", "start_hz": 300e6, "stop_hz": 800e6, "points": 450},
+            {"name": "800-1000 MHz", "start_hz": 800e6, "stop_hz": 1000e6, "points": 180},
         ],
     },
     "sim": {                        # only used when printer/analyzer type = "sim"

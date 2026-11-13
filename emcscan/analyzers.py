@@ -35,8 +35,19 @@ class Analyzer:
 
 
 class TinySA(Analyzer):
+    """Notes from the 2026-11-12 bench test (Ultra+ ZS407, fw v1.4-200):
+    - `scan` lines are "<freq> <dBm> 0"; levels come in 0.5 dB steps.
+    - About 1 sweep in 40 came back a few points short right after a setting change,
+      so a wrong point count is retried once before giving up.
+    - The Ultra switches input path at 800 MHz and the noise floor steps down about
+      8 dB there, so bands should not straddle 800 MHz (a warning is printed).
+    - The firmware cannot report whether the LNA is on, so close() returns the unit
+      to its power-on defaults (LNA off, RBW auto) instead of "the user's settings".
+    """
     USB_IDS = {(0x0483, 0x5740)}     # STM32 virtual COM port used by TinySA / TinySA Ultra
     PROMPT = b"ch> "
+    ULTRA_START_HZ = 800e6           # Ultra input-path switch (firmware default)
+    retries = 0
 
     def connect(self):
         import serial
@@ -52,12 +63,15 @@ class TinySA(Analyzer):
         self.ser.reset_input_buffer()
         self.ser.write(b"\r")
         self._read_until_prompt(5)
-        self.version = self.cmd("version").strip()
+        lines = [ln.strip() for ln in self.cmd("version").split("\n") if ln.strip()]
+        self.version = lines[0] if lines else "unknown"
+        self.hw = next((ln for ln in lines[1:] if ln.lower().startswith("hw")), "")
         self.port = port
+        self._warned = set()
         self.cmd("pause")
         rbw = self.ac["rbw_khz"]
         self.cmd("rbw auto" if str(rbw) == "auto" else f"rbw {rbw}")
-        print(f"[analyzer] {self.version} on {port}")
+        print(f"[analyzer] {self.info()}")
 
     def _read_until_prompt(self, timeout: float) -> bytes:
         buf = b""
@@ -82,8 +96,15 @@ class TinySA(Analyzer):
         self.cmd("lna on" if on else "lna off")
         self.lna_on = on
 
-    def sweep(self, band, probe_xyz=None):
-        n = int(band["points"])
+    def _check_band(self, band):
+        a, b = float(band["start_hz"]), float(band["stop_hz"])
+        key = (a, b)
+        if a < self.ULTRA_START_HZ < b and key not in getattr(self, "_warned", set()):
+            self._warned = getattr(self, "_warned", set()) | {key}
+            print(f"[analyzer] warning: band {band.get('name', key)} crosses 800 MHz, where the "
+                  f"TinySA Ultra noise floor steps down about 8 dB. Split the band at 800 MHz.")
+
+    def _scan_once(self, band, n):
         out = self.cmd(f"scan {int(band['start_hz'])} {int(band['stop_hz'])} {n} 3", timeout=60)
         freqs, levels = [], []
         for line in out.split("\n"):
@@ -93,18 +114,37 @@ class TinySA(Analyzer):
                     freqs.append(float(parts[0])); levels.append(float(parts[1]))
                 except ValueError:
                     pass
+        return freqs, levels
+
+    def sweep(self, band, probe_xyz=None):
+        self._check_band(band)
+        n = int(band["points"])
+        freqs, levels = self._scan_once(band, n)
+        if len(levels) != n:                       # rare short reply: flush and try once more
+            self.retries += 1
+            print(f"[analyzer] got {len(levels)} of {n} points, retrying the sweep")
+            time.sleep(0.1)
+            self.ser.reset_input_buffer()
+            freqs, levels = self._scan_once(band, n)
         if len(levels) != n:
-            raise RuntimeError(f"TinySA returned {len(levels)} points, expected {n}")
+            raise RuntimeError(f"TinySA returned {len(levels)} points, expected {n} (after a retry)")
         return np.array(freqs), np.array(levels, dtype=np.float32)
 
     def close(self):
+        """Hand the unit back in its power-on state: LNA off, RBW auto, screen sweeping."""
         try:
-            self.cmd("resume")
+            for c in ("lna off", "rbw auto", "resume"):
+                try:
+                    self.cmd(c)
+                except Exception:
+                    pass
+            self.lna_on = False
         finally:
             self.ser.close()
 
     def info(self):
-        return f"{self.version} on {self.port}"
+        hw = f", {self.hw}" if getattr(self, "hw", "") else ""
+        return f"{self.version}{hw} on {self.port}"
 
 
 class SimAnalyzer(Analyzer):

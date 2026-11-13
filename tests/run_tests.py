@@ -119,30 +119,69 @@ def tinysa_parser():
     from emcscan.analyzers import TinySA
 
     class FakeSerial:
-        def __init__(self):
+        """Mimics fw v1.4-200: two-line version, 3-column scan lines, optional short replies."""
+        def __init__(self, short_replies=0):
             self.buf = b""
+            self.short = short_replies
+            self.log = []
 
         def write(self, data):
             cmd = data.decode().strip()
+            self.log.append(cmd)
             out = (cmd + "\r\n") if cmd else ""
             if cmd == "version":
-                out += "tinySA4_v1.4-fake\r\n"
+                out += "tinySA4_v1.4-fake\r\nHW Version:V0.5.4 max2871\r\n"
             elif cmd.startswith("scan"):
                 _, a, b, n, _m = cmd.split()
-                for f in np.linspace(float(a), float(b), int(n)):
-                    out += f"{f:.6e} {-80.0 + f / 1e9:.6e}\r\n"
+                pts = np.linspace(float(a), float(b), int(n))
+                if self.short:
+                    self.short -= 1
+                    pts = pts[:-4]                      # the 446-of-450 case seen on the bench
+                for f in pts:
+                    out += f"{f:.0f} {-80.0 + f / 1e9:.6e} 0.000000000 \r\n"
             self.buf += out.encode() + b"ch> "
 
         def read(self, n):
             d, self.buf = self.buf[:n], self.buf[n:]
             return d
 
-    t = TinySA(config.load(ROOT / "configs" / "a1mini_tinysa.toml"))
-    t.ser = FakeSerial()
-    t.ser.write(b"\r"); t._read_until_prompt(1)
-    assert t.cmd("version").strip() == "tinySA4_v1.4-fake"
-    f, lv = t.sweep({"start_hz": 30e6, "stop_hz": 300e6, "points": 450})
+        def reset_input_buffer(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fresh(short=0):
+        t = TinySA(config.load(ROOT / "configs" / "a1mini_tinysa.toml"))
+        t.ser = FakeSerial(short)
+        t.ser.write(b"\r"); t._read_until_prompt(1)
+        return t
+
+    band = {"name": "30-300 MHz", "start_hz": 30e6, "stop_hz": 300e6, "points": 450}
+    t = fresh()
+    lines = [ln.strip() for ln in t.cmd("version").split("\n") if ln.strip()]
+    assert lines == ["tinySA4_v1.4-fake", "HW Version:V0.5.4 max2871"]
+    f, lv = t.sweep(band)
     assert len(f) == 450 and abs(f[-1] - 300e6) < 1 and abs(lv[0] - (-80 + 0.03)) < 1e-3
+
+    t = fresh(short=1)                                   # one short reply: retried, succeeds
+    f, lv = t.sweep(band)
+    assert len(f) == 450 and t.retries == 1
+
+    t = fresh(short=2)                                   # two in a row: clear error
+    try:
+        t.sweep(band)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "after a retry" in str(e)
+
+    t = fresh()                                          # close() hands back power-on state
+    t.close()
+    assert t.ser.log[-3:] == ["lna off", "rbw auto", "resume"]
+
+    cfg = config.load(ROOT / "configs" / "a1mini_tinysa.toml")
+    for b in cfg["analyzer"]["bands"]:                   # no shipped band straddles 800 MHz
+        assert not (b["start_hz"] < TinySA.ULTRA_START_HZ < b["stop_hz"]), b["name"]
 
 
 @test
