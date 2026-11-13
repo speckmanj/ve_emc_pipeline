@@ -37,8 +37,9 @@ class Analyzer:
 class TinySA(Analyzer):
     """Notes from the 2026-11-12 bench test (Ultra+ ZS407, fw v1.4-200):
     - `scan` lines are "<freq> <dBm> 0"; levels come in 0.5 dB steps.
-    - About 1 sweep in 40 came back a few points short right after a setting change,
-      so a wrong point count is retried once before giving up.
+    - Short sweeps (446 of 450 points) turned out, on the 2026-11-13 re-test, to be
+      -100 dBm levels printed as "-:.000000e+01" (see parse_number), not lost points.
+      A wrong point count is still retried once before giving up.
     - The Ultra switches input path at 800 MHz and the noise floor steps down about
       8 dB there, so bands should not straddle 800 MHz (a warning is printed).
     - The firmware cannot report whether the LNA is on, so close() returns the unit
@@ -104,16 +105,41 @@ class TinySA(Analyzer):
             print(f"[analyzer] warning: band {band.get('name', key)} crosses 800 MHz, where the "
                   f"TinySA Ultra noise floor steps down about 8 dB. Split the band at 800 MHz.")
 
+    @staticmethod
+    def parse_number(text: str) -> float:
+        """float() that also reads the firmware's digit overflow.
+
+        fw v1.4-200 prints exactly -100 dBm as "-:.000000e+01": a mantissa digit that
+        rounded up to 10 comes out as ":" (the character after "9"). Each ":" is read
+        as a digit worth 10 at its place.
+        """
+        if ":" not in text:
+            return float(text)
+        s = text.strip()
+        sign = -1.0 if s.startswith("-") else 1.0
+        s = s.lstrip("+-")
+        mant, _, exp = s.lower().partition("e")
+        whole, _, frac = mant.partition(".")
+        digits = whole + frac
+        if not digits or any(c not in "0123456789:" for c in digits):
+            raise ValueError(f"not a number: {text!r}")
+        value = 0.0
+        for i, c in enumerate(digits):                  # place value 10**(len(whole)-1-i)
+            value += (ord(c) - ord("0")) * 10.0 ** (len(whole) - 1 - i)
+        return sign * value * 10.0 ** int(exp or 0)
+
     def _scan_once(self, band, n):
         out = self.cmd(f"scan {int(band['start_hz'])} {int(band['stop_hz'])} {n} 3", timeout=60)
-        freqs, levels = [], []
+        freqs, levels, self._bad_lines = [], [], []
         for line in out.split("\n"):
             parts = line.split()
             if len(parts) >= 2:
                 try:
-                    freqs.append(float(parts[0])); levels.append(float(parts[1]))
+                    fr, lv = self.parse_number(parts[0]), self.parse_number(parts[1])
                 except ValueError:
-                    pass
+                    self._bad_lines.append(line.strip())
+                    continue
+                freqs.append(fr); levels.append(lv)
         return freqs, levels
 
     def sweep(self, band, probe_xyz=None):
@@ -127,7 +153,9 @@ class TinySA(Analyzer):
             self.ser.reset_input_buffer()
             freqs, levels = self._scan_once(band, n)
         if len(levels) != n:
-            raise RuntimeError(f"TinySA returned {len(levels)} points, expected {n} (after a retry)")
+            bad = getattr(self, "_bad_lines", [])
+            hint = f"; unreadable lines: {bad[:3]}" if bad else ""
+            raise RuntimeError(f"TinySA returned {len(levels)} points, expected {n} (after a retry){hint}")
         return np.array(freqs), np.array(levels, dtype=np.float32)
 
     def close(self):

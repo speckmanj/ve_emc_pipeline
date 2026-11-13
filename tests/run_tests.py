@@ -120,9 +120,10 @@ def tinysa_parser():
 
     class FakeSerial:
         """Mimics fw v1.4-200: two-line version, 3-column scan lines, optional short replies."""
-        def __init__(self, short_replies=0):
+        def __init__(self, short_replies=0, overflow=False):
             self.buf = b""
             self.short = short_replies
+            self.overflow = overflow
             self.log = []
 
         def write(self, data):
@@ -137,8 +138,11 @@ def tinysa_parser():
                 if self.short:
                     self.short -= 1
                     pts = pts[:-4]                      # the 446-of-450 case seen on the bench
-                for f in pts:
-                    out += f"{f:.0f} {-80.0 + f / 1e9:.6e} 0.000000000 \r\n"
+                for i, f in enumerate(pts):
+                    if self.overflow and i % 50 == 7:   # fw prints -100 dBm like this
+                        out += f"{f:.0f} -:.000000e+01 0.000000000 \r\n"
+                    else:
+                        out += f"{f:.0f} {-80.0 + f / 1e9:.6e} 0.000000000 \r\n"
             self.buf += out.encode() + b"ch> "
 
         def read(self, n):
@@ -151,9 +155,9 @@ def tinysa_parser():
         def close(self):
             pass
 
-    def fresh(short=0):
+    def fresh(short=0, overflow=False):
         t = TinySA(config.load(ROOT / "configs" / "a1mini_tinysa.toml"))
-        t.ser = FakeSerial(short)
+        t.ser = FakeSerial(short, overflow)
         t.ser.write(b"\r"); t._read_until_prompt(1)
         return t
 
@@ -163,6 +167,20 @@ def tinysa_parser():
     assert lines == ["tinySA4_v1.4-fake", "HW Version:V0.5.4 max2871"]
     f, lv = t.sweep(band)
     assert len(f) == 450 and abs(f[-1] - 300e6) < 1 and abs(lv[0] - (-80 + 0.03)) < 1e-3
+
+    p = TinySA.parse_number                              # fw digit overflow ":" = 10
+    assert p("-:.000000e+01") == -100.0 and p("-9.150000e+01") == -91.5
+    assert abs(p("9.:00000e+01") - 100.0) < 1e-9 and p("40222717") == 40222717.0
+    for junk in ("-:x", "abc", "-:.0e+0x"):
+        try:
+            p(junk)
+            raise AssertionError(f"parsed junk {junk!r}")
+        except ValueError:
+            pass
+
+    t = fresh(overflow=True)                             # -100 dBm lines kept, no retry
+    f, lv = t.sweep(band)
+    assert len(f) == 450 and t.retries == 0 and lv[7] == -100.0 and lv[57] == -100.0
 
     t = fresh(short=1)                                   # one short reply: retried, succeeds
     f, lv = t.sweep(band)
