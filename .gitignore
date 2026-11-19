@@ -5,3 +5,10 @@ runs/
 tests/out/
 jobs/demo_photo.*
 *.egg-info/
+# customer design data never goes to git (STEP models and their caches)
+*.step
+*.stp
+*.STEP
+*.STP
+.*_top.npz
+.*_bot.npz

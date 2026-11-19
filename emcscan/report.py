@@ -80,7 +80,20 @@ def hotspots(run: Run, k: int, n=5, radius_mm=6.0, min_db=10.0):
     return cands[:n]
 
 
-def _map_axes(run: Run, ax, grid2d, title, vmin, vmax, spots=None, cmap="inferno", label="dBm"):
+def raised_grid(run: Run) -> np.ndarray | None:
+    """[height, row, col] tip height where a point was raised over a tall part, else NaN."""
+    names = run.plan.dtype.names or ()
+    if "raised" not in names:
+        return None
+    pl = run.plan
+    g = np.full((len(run.hs), len(run.ys), len(run.xs)), np.nan)
+    m = pl["raised"] > 0
+    g[pl["iz"][m].astype(int), pl["iy"][m].astype(int), pl["ix"][m].astype(int)] = pl["ht"][m]
+    return g if m.any() else None
+
+
+def _map_axes(run: Run, ax, grid2d, title, vmin, vmax, spots=None, cmap="inferno", label="dBm",
+              iz=None):
     step = float(np.min(np.diff(run.xs))) if len(run.xs) > 1 else 1.0
     ext = [run.xs[0] - step / 2, run.xs[-1] + step / 2, run.ys[0] - step / 2, run.ys[-1] + step / 2]
     if run.photo is not None:
@@ -90,6 +103,13 @@ def _map_axes(run: Run, ax, grid2d, title, vmin, vmax, spots=None, cmap="inferno
         alpha = 1.0
     im = ax.imshow(grid2d, origin="lower", extent=ext, cmap=cmap, vmin=vmin, vmax=vmax,
                    alpha=alpha, interpolation="bilinear")
+    rg = raised_grid(run) if iz is not None else None
+    if rg is not None and np.isfinite(rg[iz]).any():
+        X, Y = np.meshgrid(run.xs, run.ys)
+        m = np.isfinite(rg[iz])
+        ax.scatter(X[m], Y[m], s=9, marker="x", c="white", linewidths=0.7, alpha=0.8,
+                   label="raised over a tall part (reads weaker)")
+        ax.legend(loc="upper right", fontsize=7, framealpha=0.7)
     if spots:
         for n, s in enumerate(spots, 1):
             ax.plot(s["x"], s["y"], "o", mfc="none", mec="cyan", ms=14, mew=1.5)
@@ -175,14 +195,15 @@ def make_report(run_dir: str | Path) -> Path:
         for iz, h in enumerate(run.hs):
             fig, ax = plt.subplots(figsize=(7, 6))
             sp = [s for s in spots if s["h"] == h]
-            _map_axes(run, ax, pg[iz], f"{band['name']}  peak level  h = {h:g} mm", vmin, vmax, sp)
+            _map_axes(run, ax, pg[iz], f"{band['name']}  peak level  h = {h:g} mm", vmin, vmax, sp,
+                      iz=iz)
             imgs.append((f"Peak level, h = {h:g} mm", _png(fig, out / f"map_h{h:g}_b{k}.png")))
         # one map per top frequency, lowest height
         for f, _ in tops:
             g = run.freq_grid(k, f)
             fig, ax = plt.subplots(figsize=(7, 6))
             _map_axes(run, ax, g[0], f"{f / 1e6:.2f} MHz  h = {run.hs[0]:g} mm",
-                      np.nanmin(g), np.nanmax(g))
+                      np.nanmin(g), np.nanmax(g), iz=0)
             imgs.append((f"Where {f / 1e6:.2f} MHz comes from",
                          _png(fig, out / f"freqmap_h{run.hs[0]:g}_b{k}_{f / 1e6:.0f}MHz.png")))
         # spectra at the hotspots
@@ -219,12 +240,32 @@ def make_report(run_dir: str | Path) -> Path:
         ("Probe", f"{meta.get('probe', {}).get('name')} ({meta.get('probe', {}).get('orientation')}"
                   f" orientation)"),
         ("Analyzer", meta.get("analyzer")), ("LNA", "on" if meta.get("lna_on") else "off"),
+        ("Height sources", "; ".join(meta.get("height_sources") or []) or "one flat height"),
+        ("Points raised over tall parts", meta.get("n_raised", 0)),
         ("Points flagged possible overload", n_over)])
     body = [f"<h1>EMC near-field scan: {esc(str(meta.get('job')))}</h1>",
             f"<p class='note'>{esc(DISCLAIMER)}</p>", f"<table class='meta'>{rows}</table>"]
     if n_over:
         body.append("<p class='warn'>Some points read above the overload level with the LNA on. "
                     "Rescan with analyzer.lna = \"off\" to confirm those levels.</p>")
+    if meta.get("n_raised"):
+        body.append("<p class='note'>Points marked x were measured higher than the nominal "
+                    "height to clear a tall part, so they read weaker than their neighbours. "
+                    "A quiet area under an x is not proof of a quiet area.</p>")
+        hz = run.dir / "heights.npz"
+        if hz.exists():
+            z = np.load(hz)
+            fig, ax = plt.subplots(figsize=(7, 5))
+            ext = list(z["extent"])
+            if run.photo is not None:
+                ax.imshow(run.photo, extent=run.photo_extent)
+            im = ax.imshow(z["req"], origin="lower", extent=ext, cmap="viridis", alpha=0.65)
+            ax.set_xlim(run.xs[0] - 5, run.xs[-1] + 5); ax.set_ylim(run.ys[0] - 5, run.ys[-1] + 5)
+            ax.set_title("Lowest legal probe tip height (mm above board)", fontsize=10)
+            ax.set_xlabel("X plate (mm)"); ax.set_ylabel("Y plate (mm)")
+            plt.colorbar(im, ax=ax, shrink=0.85, label="mm")
+            body.append(f"<h2>Probe height map</h2><img src='data:image/png;base64,"
+                        f"{_png(fig, out / 'height_map.png')}'>")
     if v3d:
         body.append(f"<h2>3D overview</h2><img src='data:image/png;base64,{v3d}'>")
     for band, floor, tops, spots, imgs in sections:

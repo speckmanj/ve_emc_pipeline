@@ -6,6 +6,7 @@ interrupted and resumed, the report, and the before/after comparison.
 """
 from __future__ import annotations
 
+import math
 import shutil
 import sys
 import traceback
@@ -47,7 +48,7 @@ def sim_cfg(name="t", **scan):
 @test
 def config_write_back():
     p = OUT / "wb.toml"
-    shutil.copy(ROOT / "configs" / "a1mini_tinysa.toml", p)
+    shutil.copy(ROOT / "configs" / "a5_tinysa.toml", p)
     config.set_value(p, "calibration", "origin_x", 77.25)
     config.set_value(p, "calibration", "z_plate_top", 12.4)
     config.set_value(p, "job", "photo_rectified", "x_photo.png")
@@ -55,7 +56,7 @@ def config_write_back():
     assert c["calibration"]["origin_x"] == 77.25
     assert c["calibration"]["z_plate_top"] == 12.4
     assert c["job"]["photo_rectified"] == "x_photo.png"
-    assert "# written by" in p.read_text()                      # comments survive
+    assert "(Setup tab > Machine)" in p.read_text()            # comments survive
     assert abs(geometry.board_top_z(c) - (12.4 + 1.6)) < 1e-9
 
 
@@ -65,7 +66,7 @@ def plan_safety():
     assert planmod.check_plan(c, planmod.build_plan(c)) == []
     c["scan"]["heights"] = [3.0]                                # below 3 + 1 + 3 = 7
     assert any("too low" in e for e in planmod.check_plan(c, planmod.build_plan(c)))
-    c = sim_cfg(); c["calibration"]["origin_x"] = 170.0         # runs off the bed
+    c = sim_cfg(); c["calibration"]["origin_x"] = 290.0         # runs off the 300 mm A5 bed
     assert any("outside" in e for e in planmod.check_plan(c, planmod.build_plan(c)))
     c = sim_cfg(); c["scan"]["x_max"] = 500.0
     assert any("beyond the plate" in e for e in planmod.check_plan(c, planmod.build_plan(c)))
@@ -83,7 +84,7 @@ def geometry_round_trip():
 @test
 def cad_parts():
     from emcscan.cad import build_all
-    build_all(config.load(ROOT / "configs" / "a1mini_tinysa.toml"), OUT / "cad")
+    build_all(config.load(ROOT / "configs" / "a1mini_tinysa.toml"), OUT / "cad")   # --a1mini set
     for n in ("spacer_plate", "probe_mount_x", "probe_mount_y", "probe_gauge"):
         assert (OUT / "cad" / f"{n}.stl").stat().st_size > 1000
 
@@ -93,7 +94,7 @@ def photo_registration():
     """Render the plate top view, tilt it like a phone photo, rectify, measure the error."""
     from emcscan.markers import render_plate_image
     from emcscan.photo import detect_markers, rectify
-    c = config.load(ROOT / "configs" / "a1mini_tinysa.toml")
+    c = config.load(ROOT / "configs" / "a5_tinysa.toml")
     top = cv2.cvtColor(render_plate_image(c, 6.0), cv2.COLOR_GRAY2BGR)
     h, w = top.shape[:2]
     src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
@@ -156,7 +157,7 @@ def tinysa_parser():
             pass
 
     def fresh(short=0, overflow=False):
-        t = TinySA(config.load(ROOT / "configs" / "a1mini_tinysa.toml"))
+        t = TinySA(config.load(ROOT / "configs" / "a5_tinysa.toml"))
         t.ser = FakeSerial(short, overflow)
         t.ser.write(b"\r"); t._read_until_prompt(1)
         return t
@@ -197,7 +198,7 @@ def tinysa_parser():
     t.close()
     assert t.ser.log[-3:] == ["lna off", "rbw auto", "resume"]
 
-    cfg = config.load(ROOT / "configs" / "a1mini_tinysa.toml")
+    cfg = config.load(ROOT / "configs" / "a5_tinysa.toml")
     for b in cfg["analyzer"]["bands"]:                   # no shipped band straddles 800 MHz
         assert not (b["start_hz"] < TinySA.ULTRA_START_HZ < b["stop_hz"]), b["name"]
 
@@ -241,6 +242,78 @@ def scan_interrupt_resume_report_compare():
     assert html.exists()
     hot = (run_dir / "report" / "hotspots.csv").read_text()
     assert "25" in hot or "24" in hot or "22" in hot or "28" in hot, hot
+
+
+def _toy_board():
+    """PCB 50 x 30 x 1.6 with one 10 x 10 x 8 part centered at (25, 15), board frame."""
+    import trimesh
+    from emcscan import heightmap
+    pcb = trimesh.creation.box((50, 30, 1.6)); pcb.apply_translation((25, 15, -0.8))
+    part = trimesh.creation.box((10, 10, 8)); part.apply_translation((25, 15, 4))
+    m = trimesh.util.concatenate([pcb, part])
+    return heightmap.StepBoard(np.asarray(m.vertices), np.asarray(m.faces), 1.6, (50.0, 30.0), 8.0,
+                               2, "toy", False)
+
+
+@test
+def heightmap_ring_and_plan():
+    from emcscan import heightmap
+    board = _toy_board()
+    c = sim_cfg("hm", x_min=5.0, x_max=45.0, y_min=5.0, y_max=25.0, step=1.0, heights=[2.0],
+                clearance=1.0)
+    c["printer"]["safe_z"] = 80.0
+    c["probe"].update(name="H20", orientation="x", offset_z=0.0)
+    c["printer"]["has_nozzle"] = False
+    s = heightmap.empty_setup()
+    s["margin_xy"] = 0.0
+    s["step"] = {"file": "toy", "reg": {"b": [[0, 0], [50, 0]], "p": [[10, 20], [60, 20]]}}
+    hx = heightmap.compute(c, s, board=board)
+    # part top 8 mm at plate (35, 35); the H20 ring (R 11.9) along X: right over the part
+    # the tip needs 8 + 1; 6 mm to the side in X the ring bottom is 1.68 mm up -> 7.32 + 1
+    assert abs(float(hx.req_at(35.0, 35.0)) - 9.0) < 0.3, hx.req_at(35.0, 35.0)
+    r = 11.9; u = 6.0 + 5.0                                     # 6 mm past the part edge (half 5)
+    want = 8 - (r - math.sqrt(r * r - 6.0 ** 2)) + 1.0
+    got = float(hx.req[int((35 - hx.y0) / hx.res), int((35 + u - hx.x0) / hx.res)])
+    assert abs(got - want) < 0.6, (got, want)
+    # blade along X: 4 mm to the side in Y (thin direction) is already clear
+    assert float(hx.req_at(35.0, 35.0 + 5.0 + 3.0)) < 2.0, hx.req_at(35.0, 43.0)
+    c["probe"]["orientation"] = "y"
+    hy = heightmap.compute(c, s, board=board)
+    assert float(hy.req_at(35.0, 43.0)) > 7.0                   # now the ring spans Y
+    # plan: raised near the part, low far away, every travel line legal
+    c["scan"].update(x_min=12.0, x_max=58.0, y_min=22.0, y_max=48.0, step=2.0)
+    c["probe"]["orientation"] = "x"
+    hx = heightmap.compute(c, s, board=board)
+    plan = planmod.build_plan(c, hx)
+    assert planmod.check_plan(c, plan) == [], planmod.check_plan(c, plan)
+    near = min(plan, key=lambda p: math.hypot(p.x - 35, p.y - 35))
+    far = min(plan, key=lambda p: math.hypot(p.x - 12, p.y - 48))
+    assert near.raised and near.ht >= 9.0 and not far.raised and far.ht == 2.0
+    zb = geometry.board_top_z(c)
+    for a_, b_ in zip(plan, plan[1:]):
+        assert b_.vz - zb >= hx.via(a_.x, a_.y, b_.x, b_.y) - 1e-6
+    # a point forced below the map is refused
+    near.ht -= 3; near.nz -= 3
+    assert any("below the legal height" in e for e in planmod.check_plan(c, plan))
+
+
+@test
+def heightmap_marks_boxes_flat_and_registration():
+    from emcscan import heightmap
+    c = sim_cfg("hm2", x_min=0.0, x_max=40.0, y_min=0.0, y_max=40.0, step=2.0, heights=[2.0])
+    c["probe"].update(name="H5", orientation="x")
+    s = heightmap.empty_setup()
+    s["marks"] = [{"x": 10, "y": 10, "h": 6, "r": 2}]
+    s["boxes"] = [{"x0": 25, "x1": 30, "y0": 25, "y1": 35, "h": 4}]
+    h = heightmap.compute(c, s)
+    assert float(h.H[int((10 - h.y0) / h.res), int((10 - h.x0) / h.res)]) == 6
+    assert float(h.req_at(27.5, 30)) >= 5.0 and float(h.req_at(20, 20)) < 1.5
+    s["flat_mm"] = 3.0
+    assert float(heightmap.compute(c, s).req_at(20, 20)) >= 4.0
+    th, t, err = heightmap.registration({"b": [[0, 0], [10, 0]], "p": [[5, 5], [5, 15]]})
+    assert abs(math.degrees(th) - 90) < 1e-6 and abs(err) < 1e-9
+    P = heightmap.board_to_plate(np.array([[10.0, 0, 0]]), th, t)
+    assert np.allclose(P[0, :2], [5, 15])
 
 
 if __name__ == "__main__":

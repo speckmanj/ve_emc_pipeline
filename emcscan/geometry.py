@@ -63,7 +63,19 @@ def plate_top_z(cfg) -> float:
 
 
 def board_top_z(cfg) -> float:
+    """Z (printer frame, nozzle/tip reference) of the board top surface. Measured directly
+    (calibration.z_board_top) when the board sits on pads above the plate."""
+    zb = cfg["calibration"].get("z_board_top")
+    if zb is not None:
+        return float(zb)
     return plate_top_z(cfg) + cfg["board"]["thickness"]
+
+
+def nozzle_below_tip(cfg) -> float:
+    """How far a nozzle hangs below the probe tip (0 when the hotend is gone)."""
+    if not cfg["printer"].get("has_nozzle", True):
+        return 0.0
+    return max(cfg["probe"]["offset_z"], 0.0)
 
 
 def min_height(cfg) -> float:
@@ -74,7 +86,7 @@ def min_height(cfg) -> float:
     (offset_z > 0) the nozzle is the low point and sets the limit.
     """
     keep = cfg["board"]["tallest_part"] + cfg["scan"]["clearance"]
-    return keep + max(cfg["probe"]["offset_z"], 0.0)
+    return keep + nozzle_below_tip(cfg)
 
 
 # ---- plate -> printer ------------------------------------------------------------

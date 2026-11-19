@@ -36,7 +36,9 @@ GRID = 40.0             # hole pitch on the cover
 # --- ovals ---
 PEG_LEN = 10.0
 BODY_T = 6.0            # board sits this far above the cover (plus any nylon spacer)
-END_R = 9.0             # oval end radius
+END_R = 9.0             # oval pivot end radius (must overhang the 6.3 mm hole)
+TIP_R = 4.5             # screw end radius. Tapered (2026-11-18): round 9 mm ends collided, so two
+                        # ovals could not bring board holes closer than 18 mm; now 9 mm
 NUTS = {"m3": (3.4, 5.5 + 0.3, 2.6), "m25": (2.9, 5.0 + 0.3, 2.2)}   # screw hole, nut AF, nut depth
 
 
@@ -74,7 +76,7 @@ def flip_for_print(m: m3.Manifold) -> m3.Manifold:
 
 def oval(r: float, lock: bool, screw: str = "m3") -> m3.Manifold:
     hole_d, nut_af, nut_d = NUTS[screw]
-    ends = m3.CrossSection.circle(END_R, 64) + m3.CrossSection.circle(END_R, 64).translate((r, 0))
+    ends = m3.CrossSection.circle(END_R, 64) + m3.CrossSection.circle(TIP_R, 48).translate((r, 0))
     body = m3.Manifold.extrude(ends.hull(), BODY_T)
     body = body - cyl(r, 0, -1, BODY_T + 2, hole_d, 32)
     hexa = m3.CrossSection.circle(nut_af / math.sqrt(3), 6).rotate(30).translate((r, 0))
@@ -87,7 +89,10 @@ def oval(r: float, lock: bool, screw: str = "m3") -> m3.Manifold:
 
 # --- cone pins: press into the oval's screw hole from the top; the board hole rides down
 # the cone until it touches, so one pin centers any hole size in its range, no slop ---
-SHANK_D, SHANK_L = 3.55, 5.5      # press fit in the oval's 3.4 mm hole (PLA holes print small)
+SHANK_D, SHANK_L = 3.25, 5.5      # slip fit in the oval's 3.4 mm hole. 3.55 was too big on the
+                                  # A1 mini (2026-11-18); the board pushes the pin down, so slip is fine.
+                                  # Tune with the shank gauge (a5_fit_shank_gauge.stl)
+SHANK_GAUGE = (3.0, 3.1, 3.2, 3.3, 3.4, 3.5)   # tip first, 4 mm per step
 CONE_H = 5.0
 CONES = {"small": (5.0, 2.2), "large": (7.2, 4.0)}   # base and tip diameter = board hole range
 
@@ -100,6 +105,17 @@ def cone_pin(size: str) -> m3.Manifold:
     collar = m3.Manifold.cylinder(collar_h, SHANK_D / 2, base / 2, 48).translate((0, 0, SHANK_L))
     cone = m3.Manifold.cylinder(CONE_H, base / 2, tip / 2, 48).translate((0, 0, SHANK_L + collar_h))
     return shank + collar + cone
+
+
+def shank_gauge() -> m3.Manifold:
+    """Stepped plug gauge for the oval's screw hole: push it in from the top until it stops.
+    Count the steps that went in from the tip (1 = 3.0 mm ... 6 = 3.5 mm). Prints upright."""
+    g = m3.Manifold.cylinder(8, 4, 4, 48)                    # handle on the bed
+    z = 8.0
+    for d in reversed(SHANK_GAUGE):
+        g += m3.Manifold.cylinder(4, d / 2, d / 2, 48).translate((0, 0, z))
+        z += 4
+    return g
 
 
 def board_height(size: str, hole_d: float) -> float:
@@ -138,6 +154,7 @@ def build_kit(out: Path) -> None:
         print(f"    rest pad for {hole} mm holes on the {size} cone: {h:.2f} mm")
         save(flip_for_print(rest_pad(h)), out / f"a5_kit_rest_pad_hole{hole:.1f}_{size}.stl")
     save(flip_for_print(tie_post()), out / "a5_kit_tie_post.stl")
+    save(shank_gauge(), out / "a5_fit_shank_gauge.stl")
     # spline fit test: one hole in a small block (print with the free and lock r10 ovals)
     blk = m3.Manifold.cube((26, 26, HOLE_DEPTH + 2)) - hole_cutter(HOLE_DEPTH + 2).translate((13, 13, 0))
     save(blk, out / "a5_fit_spline_block.stl")

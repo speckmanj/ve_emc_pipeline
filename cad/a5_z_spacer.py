@@ -3,18 +3,25 @@
     .venv\\Scripts\\python cad\\a5_z_spacer.py               60 mm extension
     .venv\\Scripts\\python cad\\a5_z_spacer.py --ext 55 --mirror
 
-The stock white spacer on the Z arm (15 mm tall, 21.2 mm wide, two screws 13 mm apart)
-comes down onto the Z switch. This copy keeps the same top (mounting) end and grows
-EXT mm downward, so the gantry stops EXT mm higher.
+Stock white spacer (Jacob's calipers, 2026-11-16), mounting face up against the Z carriage,
+bottom face strikes the Z switch:
+  - footprint W 15 (x) by D 21 (y), block 15.25 tall; a 4.2 mm flange strip runs the full
+    21 mm length along one long side (x 0..FLANGE_W), the rest is the full-height block
+  - screw A: flange, x 3, y 15 from the flange's outer corner; head sits on the flange underside
+  - screw B: block, x 10.8, y 4; 6.5 mm counterbore from the bottom up to flange level
+  - a third small hole is unused and is left out
+Both screws pass through 4.2 mm of plastic (the flange thickness).
 
-Buried screws: a side window at each screw lets a short hex key (ball end is easiest)
-reach the head from the front, so no long bit is needed. A rib between the windows
-and the back wall keep it stiff. Bottom: optional M3 fine-adjust screw in a captive nut
-(screw head down, it becomes the strike point; lock with a second nut or a dab of glue).
+This copy keeps the flange and grows the block EXT mm downward, so the gantry stops EXT mm
+higher. Screw A stays open from below and from the sides (nothing under the flange).
+Screw B would be buried 70+ mm deep, so a side window opens the block from the step face
+(the flange side, where a right-angle hex key comes in) at the screw head. The window is the
+stock 6.5 mm counterbore width, so it leaves the same 0.95 mm outer skin the stock part has. Bottom: optional M3 fine-adjust screw in a captive nut (screw head
+down, it becomes the strike point; lock with a second nut or a dab of glue).
 
-Print standing, mounting face down (as exported). Output: cad/out/a5_z_spacer_ext<EXT>.stl
-ASSUMED (confirm): depth 14 mm, M3 + M2 screws, holes centered in depth and across the width,
-original screws pass through 12 mm of plastic under their heads.
+Print mounting face down (as exported; z = 0 is the mounting face).
+Output: cad/out/a5_z_spacer_ext<EXT>.stl
+All sizes measured by Jacob 2026-11-16 (caliper A to B 12.2 to 13.5 mm, within reading error).
 """
 from __future__ import annotations
 
@@ -29,41 +36,44 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from emcscan.cad import box, cyl, save  # noqa: E402
 
-H0, W, D = 15.0, 21.2, 14.0          # stock spacer: height, width, depth (depth ASSUMED)
-PITCH = 13.0                         # screw center to center
-SEAT = 12.0                          # plastic under each screw head (ASSUMED, as stock)
-WIN_H = 24.0                         # window height: room to insert the screw and the key
-BACK = 3.5                           # back wall left behind the windows
-SCREWS = [("M3", 3.4, 6.2), ("M2", 2.4, 4.4)]   # name, clearance hole, head clearance
+W, D, H0 = 15.0, 21.0, 15.25         # stock: width (x), depth (y), height
+FLANGE_T = 4.2                       # flange thickness, also the plastic under both screw heads
+FLANGE_W = 5.7                       # flange strip width along x (outer edge to the step)
+HOLE_A = (3.0, 15.0)                  # flange screw (x, y)
+HOLE_B = (10.8, 4.0)                 # block screw (x, y)
+CLEAR = 3.4                          # M3 clearance
+HEAD = 6.5                           # stock counterbore, M3 socket head with room
+WIN_H = 24.0                         # window height below the head: head + key short leg
+WIN_W = HEAD                         # window width (y), same as the stock counterbore
 
 
 def spacer(ext: float, mirror: bool, adjust: bool = True) -> m3.Manifold:
     H = H0 + ext
-    part = box(0, 0, 0, W, D, H)
-    xs = [W / 2 - PITCH / 2, W / 2 + PITCH / 2]
-    if mirror:
-        xs = xs[::-1]
-    seat_z = H - SEAT
-    for (name, hole, head), x in zip(SCREWS, xs):
-        part = part - cyl(x, D / 2, seat_z - 1, SEAT + 2, hole, 32)          # through the seat
-        hw = head / 2 + 1.2                                                    # window half width
-        part = part - box(x - hw, -1, seat_z - WIN_H, x + hw, D - BACK, seat_z)
-        part = part - cyl(x, D / 2, seat_z - WIN_H - 0.5, WIN_H + 0.5, head, 32)  # round the back
-    if adjust:  # M3 fine-adjust screw from the bottom, captive nut slot open to the front
-        part = part - cyl(W / 2, D / 2, -1, 16, 3.4, 32)
+    part = box(0, 0, 0, W, D, FLANGE_T) + box(FLANGE_W, 0, 0, W, D, H)
+    # both screws through the flange layer
+    for x, y in (HOLE_A, HOLE_B):
+        part = part - cyl(x, y, -1, FLANGE_T + 2, CLEAR, 32)
+    # screw B: window from the step face (x = FLANGE_W) to the head, round back end
+    bx, by = HOLE_B
+    z0 = FLANGE_T
+    part = part - box(FLANGE_W - 1, by - WIN_W / 2, z0, bx, by + WIN_W / 2, z0 + WIN_H)
+    part = part - cyl(bx, by, z0, WIN_H, WIN_W, 48)
+    if adjust:  # M3 fine-adjust screw from the strike end, captive nut slot open to the step face
+        cx, cy = (FLANGE_W + W) / 2, D / 2
+        part = part - cyl(cx, cy, H - 16, 17, CLEAR, 32)
         nut = m3.CrossSection.circle(5.8 / math.sqrt(3), 6).rotate(30)
-        slot = m3.Manifold.extrude(nut, 2.8).translate((W / 2, D / 2, 6))
-        part = part - slot - box(W / 2 - 2.95, -1, 6, W / 2 + 2.95, D / 2, 8.8)
-    # flip so the mounting face (top) prints on the bed
-    part = part.rotate((180, 0, 0))
-    lo = part.bounding_box()
-    return part.translate((-lo[0], -lo[1], -lo[2]))
+        nz = H - 8.8
+        part = part - m3.Manifold.extrude(nut, 2.8).translate((cx, cy, nz))
+        part = part - box(FLANGE_W - 1, cy - 2.95, nz, cx, cy + 2.95, nz + 2.8)
+    if mirror:  # mirror image: flange on the other long side, same hole spacing
+        part = part.mirror((1, 0, 0)).translate((W, 0, 0))
+    return part
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--ext", type=float, default=60.0)
-    ap.add_argument("--mirror", action="store_true", help="swap the M3 and M2 holes")
+    ap.add_argument("--mirror", action="store_true", help="mirror-image part (flange on the other long side)")
     ap.add_argument("--no-adjust", action="store_true")
     a = ap.parse_args()
     tag = f"ext{a.ext:g}" + ("_mirror" if a.mirror else "")

@@ -1,5 +1,8 @@
 # Workflow and bench checklists
 
+> 2026-11-18: the JG Aurora A5 is now the default gantry. Sections 1 and 2 below are still written for the
+> A1 mini; for the A5 use the app (`EMC Scanner.bat`) and `configs\a5_tinysa.toml`.
+
 ## 0. Print the parts (once)
 
 | Part | File | Settings | Notes |

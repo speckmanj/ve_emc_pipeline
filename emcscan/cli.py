@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TEMPLATE = ROOT / "configs" / "a1mini_tinysa.toml"
+TEMPLATE = ROOT / "configs" / "a5_tinysa.toml"   # A1 mini: configs/a1mini_tinysa.toml
 
 
 def _cfg(path):
@@ -17,9 +17,21 @@ def _cfg(path):
     return config.load(path)
 
 
+A5_PARTS = (  # (script in cad/, args): the JG Aurora A5 gantry set, written to cad/out
+    ("a5_bed_cover.py", []), ("a5_fixture.py", []), ("a5_probe_mount.py", []),
+    ("tbps01_dummy.py", []), ("a5_z_spacer.py", []), ("a5_fit_test.py", []),
+)
+
+
 def cmd_stl(a):
-    from .cad import build_all
-    build_all(_cfg(a.config), Path(a.out), a.cad)
+    if a.a1mini:                                  # old A1 mini set: spacer plate, mounts, gauge
+        from .cad import build_all
+        build_all(_cfg(a.config), Path(a.out), a.cad)
+        return
+    import subprocess
+    for script, args in A5_PARTS:
+        print(f"== cad/{script}")
+        subprocess.run([sys.executable, str(ROOT / "cad" / script), *args], cwd=ROOT, check=True)
 
 
 def cmd_markers(a):
@@ -38,7 +50,13 @@ def cmd_plan(a):
     s = cfg["scan"]
     print(f"area X {s['x_min']}..{s['x_max']}  Y {s['y_min']}..{s['y_max']} mm, step {s['step']} mm, "
           f"heights {s['heights']} -> {len(plan)} points")
-    print(f"minimum safe height {geometry.min_height(cfg):.1f} mm above the board")
+    if plan.heights is not None:
+        n_r = sum(p.raised for p in plan)
+        print("heights from: " + "; ".join(plan.heights.sources))
+        print(f"tip height {min(p.ht for p in plan):.1f} to {max(p.ht for p in plan):.1f} mm above the "
+              f"board; {n_r} of {len(plan)} points raised over tall parts")
+    else:
+        print(f"minimum safe height {geometry.min_height(cfg):.1f} mm above the board (flat rule)")
     print(f"nozzle X {min(p.nx for p in plan):.1f}..{max(p.nx for p in plan):.1f}  "
           f"Y {min(p.ny for p in plan):.1f}..{max(p.ny for p in plan):.1f}  "
           f"Z {min(p.nz for p in plan):.2f}..{max(p.nz for p in plan):.2f}")
@@ -116,8 +134,12 @@ def cmd_photo(a):
 
 
 def cmd_scan(a):
-    from .scan import run_scan
-    run_scan(_cfg(a.config), resume=a.resume, live=a.live)
+    from .scan import ScanRefused, run_scan
+    try:
+        run_scan(_cfg(a.config), resume=a.resume, live=a.live)
+    except ScanRefused as e:
+        print(e)
+        sys.exit(2)
 
 
 def cmd_live(a):
@@ -136,6 +158,16 @@ def cmd_report(a):
 def cmd_compare(a):
     from .compare import compare
     compare(a.before, a.after)
+
+
+def cmd_app(a):
+    from .app import main as app_main
+    app_main(a.config)
+
+
+def cmd_preview(a):
+    from .preview import show
+    show(a.config, a.screenshot)
 
 
 def _demo_photo(cfg):
@@ -194,6 +226,7 @@ def main(argv=None):
     sp = add("stl", cmd_stl, "build the printable STL parts into cad/out")
     sp.add_argument("--config", default=str(TEMPLATE)); sp.add_argument("--cad", default=None)
     sp.add_argument("--out", default=str(ROOT / "cad" / "out"))
+    sp.add_argument("--a1mini", action="store_true", help="old Bambu A1 mini parts instead of the A5 set")
     sp = add("markers", cmd_markers, "make the printable paper marker sheet (PDF + PNG)")
     sp.add_argument("--config", default=str(TEMPLATE)); sp.add_argument("--out", default=str(ROOT / "cad" / "out"))
     sp = add("plan", cmd_plan, "check a job: points, safety, time; optional path preview")
@@ -220,6 +253,10 @@ def main(argv=None):
     sp.add_argument("run"); sp.add_argument("--open", action="store_true")
     sp = add("compare", cmd_compare, "before/after comparison of two runs on the same grid")
     sp.add_argument("before"); sp.add_argument("after")
+    sp = add("app", cmd_app, "the desktop app: Prep, Setup, Run, Results in one window")
+    sp.add_argument("config", nargs="?", default=None, help="job file to open (default: the last one)")
+    sp = add("preview", cmd_preview, "3D view of a job: board, tall parts, probe path by tip height")
+    sp.add_argument("config"); sp.add_argument("--screenshot", default=None, help="save one image and exit")
     sp = add("demo", cmd_demo, "simulated end-to-end job, no hardware needed")
     sp.add_argument("--live", action="store_true")
 

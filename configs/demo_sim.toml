@@ -4,6 +4,11 @@
 name = "demo_before_fix"
 photo_rectified = "../jobs/demo_photo.png"
 
+[plate]                         # the demo was built on the small 150 x 12 mm plate (and its photo);
+width = 150.0                   # pinned here because the defaults are now the A5 cover
+depth = 150.0
+height = 12.0
+
 [board]
 thickness = 1.6
 tallest_part = 3.0
@@ -14,6 +19,9 @@ offset_z = 3.0
 
 [printer]
 type = "sim"
+safe_z = 40.0
+has_nozzle = true
+z_min = -999.0
 
 [calibration]
 origin_x = 40.0

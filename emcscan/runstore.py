@@ -2,7 +2,10 @@
 
 runs/<date>-<time>_<job>/
     config.toml          exact config used (copy)
-    plan.csv             every planned point: idx, grid indices, plate x/y/h, nozzle x/y/z
+    plan.csv             every planned point: idx, grid indices, plate x/y/h, nozzle x/y/z,
+                         ht (actual tip height, > h where raised over a tall part), raised
+    heights.npz          height map and required tip height (jobs with a height setup)
+    setup.json           the height setup used (STEP file, registration, marks, boxes)
     meta.json            analyzer, LNA decision, start/end time, band frequencies file names
     freqs_b<k>.npy       frequency axis of band k (Hz)
     traces_b<k>.f32      raw sweeps of band k, float32, one row per measured point
@@ -28,7 +31,7 @@ import numpy as np
 
 from .plan import ScanPoint
 
-PLAN_COLS = ["idx", "ix", "iy", "iz", "x", "y", "h", "nx", "ny", "nz"]
+PLAN_COLS = ["idx", "ix", "iy", "iz", "x", "y", "h", "nx", "ny", "nz", "ht", "raised"]
 
 
 class RunWriter:
@@ -50,7 +53,16 @@ class RunWriter:
             w.writerow(PLAN_COLS)
             for p in plan:
                 w.writerow([p.idx, p.ix, p.iy, p.iz, p.x, p.y, p.h,
-                            round(p.nx, 3), round(p.ny, 3), round(p.nz, 3)])
+                            round(p.nx, 3), round(p.ny, 3), round(p.nz, 3), p.ht, int(p.raised)])
+        heights = getattr(plan, "heights", None)
+        if heights is not None:                  # what the probe had to clear, for the report
+            np.savez_compressed(folder / "heights.npz", H=heights.H.astype(np.float32),
+                                req=heights.req.astype(np.float32), extent=np.array(heights.extent),
+                                sources=np.array(json.dumps(heights.sources)))
+            from .heightmap import setup_path
+            sp = setup_path(cfg)
+            if sp.exists():
+                shutil.copy(sp, folder / "setup.json")
         photo = cfg["job"].get("photo_rectified", "")
         if photo:
             src = resolve(cfg, photo)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import ssl
 import threading
 import time
@@ -48,21 +49,38 @@ class Printer:
         self.pos = None
         self._sleep_worst_case(extra=25.0)   # homing time is not reported; be generous
 
-    def move_to(self, x: float, y: float, z: float):
-        """Move the nozzle. Goes up first, then across, then down, so the nozzle never
-        drags diagonally into the board."""
+    def move_to(self, x: float, y: float, z: float, via_z: float | None = None):
+        """Move the nozzle (or probe tip). Goes up first, then across, then down, so it
+        never drags diagonally into the board. via_z: cross at least this high (the
+        highest legal height along the way, from the height map)."""
         x, y, z = round(x, 3), round(y, 3), round(z, 3)
         fxy, fz = self.pc["feed_xy"], self.pc["feed_z"]
         cur = self.pos
-        if cur is None or z > cur[2]:
-            self._line(f"G1 Z{z} F{fz:.0f}", cur, (cur[0], cur[1], z) if cur else None, fz)
-            cur = (cur[0], cur[1], z) if cur else None
-            self._line(f"G1 X{x} Y{y} F{fxy:.0f}", cur, (x, y, z) if cur else None, fxy)
+        travel = z if cur is None else max(z, cur[2])
+        if via_z is not None:
+            travel = max(travel, round(float(via_z), 3))
+        if cur is None:
+            self._line(f"G1 Z{travel} F{fz:.0f}", None, None, fz)
+            self._line(f"G1 X{x} Y{y} F{fxy:.0f}", None, None, fxy)
         else:
-            self._line(f"G1 X{x} Y{y} F{fxy:.0f}", cur, (x, y, cur[2]), fxy)
-            self._line(f"G1 Z{z} F{fz:.0f}", (x, y, cur[2]), (x, y, z), fz)
+            if travel > cur[2]:
+                self._line(f"G1 Z{travel} F{fz:.0f}", cur, (cur[0], cur[1], travel), fz)
+            self._line(f"G1 X{x} Y{y} F{fxy:.0f}", (cur[0], cur[1], travel), (x, y, travel), fxy)
+        if z < travel:
+            self._line(f"G1 Z{z} F{fz:.0f}", (x, y, travel), (x, y, z), fz)
         self.pos = (x, y, z)
         time.sleep(self.pc["settle_s"])
+
+    def jog(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0):
+        """Relative move from the last commanded position (Z first when going up)."""
+        if self.pos is None:
+            raise RuntimeError("position unknown: home or go to a known point first")
+        x, y, z = self.pos
+        self.move_to(x + dx, y + dy, z + dz)
+
+    def where(self):
+        """Position as the printer reports it, or the last commanded one."""
+        return self.pos
 
     def lift(self):
         """Raise to safe_z (used at the end and on Ctrl+C)."""
@@ -106,11 +124,11 @@ class SimPrinter(Printer):
     def _sleep_worst_case(self, extra=0.0):
         pass
 
-    def move_to(self, x, y, z):
+    def move_to(self, x, y, z, via_z=None):
         settle = self.pc["settle_s"]
         self.pc["settle_s"] = settle * float(self.cfg["sim"]["time_scale"])
         try:
-            super().move_to(x, y, z)
+            super().move_to(x, y, z, via_z)
         finally:
             self.pc["settle_s"] = settle
 
@@ -123,7 +141,22 @@ class SerialGcodePrinter(Printer):
         self.ser = serial.Serial(self.pc["port"], int(self.pc["baud"]), timeout=1)
         time.sleep(2.0)                         # many boards reset when the port opens
         self.ser.reset_input_buffer()
-        print(f"[printer] serial G-code on {self.pc['port']}")
+        # Handshake: a wrong baud gives garbage and no 'ok', which used to look like a
+        # 120 s hang per line. Ask for the firmware name and fail fast with a clear message.
+        self.ser.write(b"\nM115\n")
+        reply, deadline = b"", time.time() + 4.0
+        while time.time() < deadline and b"ok" not in reply:
+            reply += self.ser.read(256)
+        if b"FIRMWARE_NAME" not in reply and b"ok" not in reply:
+            self.ser.close()
+            raise ConnectionError(
+                f"no G-code reply on {self.pc['port']} at {self.pc['baud']} baud "
+                f"(got {reply[:40]!r}). Check [printer] baud (JG Aurora A5 = 250000) and port "
+                f"(Device Manager > Ports, CH340), and close any other program using the port.")
+        name = re.search(rb"MACHINE_TYPE:([^\r\n]*?)(?: EXTRUDER| UUID|\r|\n|$)", reply)
+        self.ser.reset_input_buffer()
+        print(f"[printer] serial G-code on {self.pc['port']}"
+              + (f": {name.group(1).decode(errors='replace').strip()}" if name else ""))
 
     def send(self, gcode, wait=False):
         lines = [g for g in gcode.splitlines() if g.strip()]
@@ -143,7 +176,24 @@ class SerialGcodePrinter(Printer):
 
     def home(self):
         self.send("G28", wait=True)
-        self.pos = None
+        self.pos = self.where()
+
+    def where(self):
+        """M114 after M400: 'X:10.00 Y:20.00 Z:5.00 E:0.00 Count ...'."""
+        import re
+        self.send("M400")
+        self.ser.write(b"M114\n")
+        pos, deadline = None, time.time() + 5
+        while time.time() < deadline:
+            resp = self.ser.readline().decode(errors="replace").strip()
+            m = re.match(r"X:\s*(-?[\d.]+)\s+Y:\s*(-?[\d.]+)\s+Z:\s*(-?[\d.]+)", resp)
+            if m:
+                pos = tuple(float(v) for v in m.groups())
+            if resp.startswith("ok"):
+                break
+        if pos is not None:
+            self.pos = pos
+        return self.pos
 
     def close(self):
         self.ser.close()

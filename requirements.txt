@@ -6,3 +6,5 @@ pyserial
 paho-mqtt
 manifold3d
 trimesh
+scipy
+cascadio

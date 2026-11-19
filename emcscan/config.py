@@ -19,11 +19,12 @@ DEFAULTS: dict = {
     "job": {
         "name": "job",
         "photo_rectified": "",      # set by `emcscan photo`
+        "setup": "",                # height setup JSON (default: <job file name>_setup.json)
     },
-    "plate": {                      # the printed spacer plate (cad/out/spacer_plate.stl)
-        "width": 150.0,             # X, left to right
-        "depth": 150.0,             # Y, front to back
-        "height": 12.0,             # Z, nominal thickness
+    "plate": {                      # A5 bed cover (cad/a5_bed_cover.py). A1 mini: 150 x 150 x 12
+        "width": 310.0,             # X, left to right
+        "depth": 310.0,             # Y, front to back
+        "height": 50.0,             # Z, nominal thickness
         "marker_size": 20.0,        # black square of each paper marker
         "marker_border": 3.0,       # white quiet zone around the black square
         "marker_inset": 4.0,        # gap from plate edge to marker pocket
@@ -34,9 +35,12 @@ DEFAULTS: dict = {
         "tallest_part": 3.0,        # tallest component above the board top surface
     },
     "probe": {
-        "name": "H10",              # TBPS01: H20, H10, H5 or E5
+        "name": "H20",              # TBPS01: H20, H10, H5 or E5
         "orientation": "x",         # "x": loop plane along printer X, "y": rotated 90 degrees
-        "offset_z": 3.0,            # probe tip ABOVE nozzle tip (mm). Set with the printed gauge.
+        "offset_z": 0.0,            # probe tip ABOVE nozzle tip (mm). A5: 0, the tip IS the reference
+        "tip_w": 0.0,               # widest tip seen from the side; 0 = TBPS01 table (heightmap.py)
+        "head_h": 20.0,             # probe mount underside above the tip (A5 mount v4: 20.5)
+        "head_r": 45.0,             # radius around the probe treated as mount and head
     },
     "printer": {
         "type": "sim",              # sim | bambu_mqtt | serial_gcode | moonraker
@@ -44,22 +48,26 @@ DEFAULTS: dict = {
         "serial": "",               # bambu_mqtt: printer serial number
         "access_code": "",          # bambu_mqtt: LAN access code from the printer screen
         "port": "",                 # serial_gcode: COM port
-        "baud": 115200,
+        "baud": 250000,             # JG Aurora A5, Marlin 1.1.8
         "url": "",                  # moonraker: http://<ip>:7125
-        "bed_x": 180.0,             # nozzle travel limits (A1 mini: 180 x 180 x 180)
-        "bed_y": 180.0,
-        "z_max": 150.0,
-        "safe_z": 40.0,             # nozzle Z for travel moves and at the end
+        "bed_x": 300.0,             # travel limits, JG Aurora A5 (A1 mini: 180 x 180 x 150)
+        "bed_y": 305.0,
+        "z_max": 250.0,
+        "z_min": 0.0,               # lowest Z the firmware accepts (A5 raised endstop: 0; A1 mini: -999)
+        "has_nozzle": False,        # False: hotend removed, the probe tip is the lowest point (A5)
+        "safe_z": 60.0,             # Z for travel moves and at the end (A1 mini: 40)
         "feed_xy": 3000.0,          # mm/min
         "feed_z": 600.0,            # mm/min
         "accel": 500.0,             # mm/s^2, kept low so the moving bed does not jolt the board
         "settle_s": 0.15,           # wait after each move before measuring
     },
     "calibration": {                # written by `emcscan calibrate`
-        "origin_x": 90.0,           # nozzle X when the PROBE TIP is over marker 0
-        "origin_y": 90.0,           # nozzle Y when the PROBE TIP is over marker 0
+        "origin_x": 150.0,          # nozzle X when the PROBE TIP is over marker 0
+        "origin_y": 150.0,          # nozzle Y when the PROBE TIP is over marker 0
         "angle_deg": 0.0,           # plate rotation on the bed (from markers 0 and 1)
         # "z_plate_top": nozzle Z touching the plate top; absent = use plate.height
+        # "z_board_top": probe tip Z touching the board top (boards on pads); overrides
+        #                z_plate_top + board.thickness
     },
     "scan": {                       # all in PLATE coordinates: origin = center of marker 0
         "x_min": 10.0, "x_max": 60.0,

@@ -1,6 +1,6 @@
 """JG Aurora A5 bed cover: 2 x 2 jigsaw tiles that each fit the Bambu A1 mini (180 x 180).
 
-    .venv\\Scripts\\python cad\\a5_bed_cover.py                 305 mm square, 12 mm thick
+    .venv\\Scripts\\python cad\\a5_bed_cover.py                 310 mm square, 50 mm thick (the A5 cover as built)
     .venv\\Scripts\\python cad\\a5_bed_cover.py --size 310 --thick 8
 
 Each tile has one knob and one socket, so the four only go together one way.
@@ -117,7 +117,7 @@ def build(size: float, thick: float, out: Path) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--size", type=float, default=305.0, help="cover width = depth, mm")
-    ap.add_argument("--thick", type=float, default=12.0, help="cover thickness, mm")
+    ap.add_argument("--size", type=float, default=310.0, help="cover width = depth, mm")
+    ap.add_argument("--thick", type=float, default=50.0, help="cover thickness, mm (50 = CISPR 25 DUT height)")
     a = ap.parse_args()
     build(a.size, a.thick, ROOT / "cad" / "out")
