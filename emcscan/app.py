@@ -42,6 +42,7 @@ from matplotlib.patches import Circle, Rectangle
 
 from . import config as cfgmod
 from . import geometry, heightmap
+from . import theme
 from .plan import build_plan, check_plan, estimate_seconds
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -123,13 +124,7 @@ class App(tk.Tk):
         self._drag = None
         self._view_lim = None
 
-        style = ttk.Style(self)
-        try:
-            style.theme_use("vista")
-        except tk.TclError:
-            pass
-        style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=6)
-        style.configure("Head.TLabel", font=("Segoe UI", 10, "bold"))
+        theme.apply(self)                       # dark: widgets, plots, title bars
 
         self._build_topbar()
         pw = ttk.PanedWindow(self, orient="vertical")
@@ -138,7 +133,8 @@ class App(tk.Tk):
         pw.add(self.nb, weight=5)
         logf = ttk.Frame(pw)
         pw.add(logf, weight=1)
-        self.log = tk.Text(logf, height=7, font=("Consolas", 9), wrap="none", bg="#111", fg="#ddd")
+        self.log = tk.Text(logf, height=7, font=("Consolas", 9), wrap="none", bg=theme.FIELD, fg=theme.TEXT,
+                           insertbackground=theme.TEXT, relief="flat")
         sb = ttk.Scrollbar(logf, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
@@ -273,7 +269,7 @@ class App(tk.Tk):
             ttk.Label(d, text=lab).grid(row=i, column=0, sticky="w", padx=8, pady=4)
             ttk.Entry(d, textvariable=var, width=60).grid(row=i, column=1, padx=8, pady=4)
         ttk.Label(d, text="Creates <jobs folder>\\YYYY-MM_Customer_Device\\04_scan\\scan.toml "
-                          "(or opens it if it exists).", foreground="#555").grid(
+                          "(or opens it if it exists).", foreground=theme.DIM).grid(
             row=len(rows), column=0, columnspan=2, padx=8, sticky="w")
 
         def create():
@@ -386,7 +382,7 @@ class App(tk.Tk):
         if self.heights is not None:
             txt += "heights: " + "; ".join(self.heights.sources) + "\n"
         txt += "SAFE TO RUN" if not self.problems else "PROBLEMS:\n- " + "\n- ".join(self.problems)
-        self.lbl_stats.configure(text=txt, foreground="#1b5e20" if not self.problems else "#b71c1c")
+        self.lbl_stats.configure(text=txt, foreground=theme.OK if not self.problems else theme.BAD)
         self.lbl_run_summary.configure(text=txt, foreground=self.lbl_stats.cget("foreground"))
         self._update_step_info()
         self.draw_setup()
@@ -406,7 +402,7 @@ class App(tk.Tk):
             w.bind("<FocusOut>", lambda e: self._commit(var, section, key, kind))
         w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
         if note:
-            ttk.Label(parent, text=note, foreground="#666").grid(row=row, column=2, sticky="w")
+            ttk.Label(parent, text=note, foreground=theme.DIM).grid(row=row, column=2, sticky="w")
         self._fields.append((var, section, key, kind))
         return var
 
@@ -498,15 +494,15 @@ class App(tk.Tk):
         ttk.Button(f, text="Marker sheet (PDF)", command=self.marker_sheet).grid(row=1, column=1, sticky="we", pady=2, padx=4)
         ttk.Button(f, text="Edit job file", command=lambda: self.cfg and os.startfile(self.cfg["_path"])).grid(row=1, column=2, sticky="we", pady=2)
         ttk.Label(mid, text="Bands, RBW and other rarely changed settings live in the job file "
-                            "(Edit job file, then Reload).", foreground="#666", wraplength=420).pack(anchor="w", pady=6)
+                            "(Edit job file, then Reload).", foreground=theme.DIM, wraplength=420).pack(anchor="w", pady=6)
 
         ttk.Label(right, text="Checklist", style="Head.TLabel").pack(anchor="w")
         cols = ("state", "item", "detail")
         self.tv_checks = ttk.Treeview(right, columns=cols, show="headings", height=18)
         for c, w in zip(cols, (50, 170, 560)):
             self.tv_checks.heading(c, text=c.capitalize()); self.tv_checks.column(c, width=w, anchor="w")
-        self.tv_checks.tag_configure("bad", foreground="#b71c1c")
-        self.tv_checks.tag_configure("ok", foreground="#1b5e20")
+        self.tv_checks.tag_configure("bad", foreground=theme.BAD)
+        self.tv_checks.tag_configure("ok", foreground=theme.OK)
         self.tv_checks.pack(fill="both", expand=True)
         ttk.Button(right, text="Recheck", command=self.recompute).pack(anchor="e", pady=4)
 
@@ -659,9 +655,12 @@ class App(tk.Tk):
     def marker_sheet(self):
         if self.cfg is None:
             return
+        import matplotlib.style
         from .markers import make_sheet
         out = Path(self.cfg["_dir"])
-        for p in make_sheet(self.cfg, out):
+        with matplotlib.style.context("default"):          # printed: white, not the dark theme
+            sheet = make_sheet(self.cfg, out)
+        for p in sheet:
             self.say(f"[markers] {p}")
         os.startfile(str(out))
 
@@ -830,7 +829,7 @@ class App(tk.Tk):
     # Heights panel
     def _build_heights_panel(self, f):
         ttk.Label(f, text="Low-profile board (no STEP): one master height for everything",
-                  wraplength=360, foreground="#444").pack(anchor="w")
+                  wraplength=360, foreground=theme.DIM).pack(anchor="w")
         r = ttk.Frame(f); r.pack(fill="x", pady=2)
         ttk.Label(r, text="Master height = tallest part (mm)").pack(side="left")
         self.v_flat = tk.StringVar()
@@ -845,7 +844,7 @@ class App(tk.Tk):
         e.bind("<FocusOut>", lambda ev: self._set_setup_num("margin_xy", self.v_margin))
         ttk.Separator(f).pack(fill="x", pady=6)
         ttk.Label(f, text="Tall parts (taught marks and drawn boxes). Add with the click modes "
-                          "above, or Machine > Mark tall part here.", wraplength=360, foreground="#444").pack(anchor="w")
+                          "above, or Machine > Mark tall part here.", wraplength=360, foreground=theme.DIM).pack(anchor="w")
         self.lb_parts = tk.Listbox(f, height=12, font=("Consolas", 9))
         self.lb_parts.pack(fill="both", expand=True, pady=4)
         r = ttk.Frame(f); r.pack(fill="x")
@@ -908,7 +907,7 @@ class App(tk.Tk):
                           "points (corners work well) and show where each one is on the plate: "
                           "click it on the photo (click mode Plate point 1/2) or jog the probe "
                           "tip onto it and press Use probe position.", wraplength=360,
-                  foreground="#444").pack(anchor="w")
+                  foreground=theme.DIM).pack(anchor="w")
         self.reg_fig = Figure(figsize=(3.6, 1.9), dpi=90)
         self.reg_ax = self.reg_fig.add_subplot(111)
         self.reg_canvas = FigureCanvasTkAgg(self.reg_fig, master=f)
@@ -1106,7 +1105,7 @@ class App(tk.Tk):
         ttk.Button(tf, text="Mark tall part here", command=self.mark_here).pack(fill="x", pady=2)
         ttk.Label(tf, text="Big parts: mark two or three corners. Each mark becomes a post of this "
                            "radius at this height; the app adds the probe ring around it.",
-                  wraplength=360, foreground="#555").pack(anchor="w")
+                  wraplength=360, foreground=theme.DIM).pack(anchor="w")
 
     def _tip_h(self, pos=None):
         """Probe tip height above the board top for a nozzle position."""
@@ -1274,7 +1273,7 @@ class App(tk.Tk):
         self._field(f, 6, "Clearance (mm)", "scan", "clearance", width=8)
         ttk.Label(f, text="Heights are the nominal probe tip height above the board top. Each "
                           "point rises only as far as needed to clear the parts around it.",
-                  wraplength=340, foreground="#555").grid(row=7, column=0, columnspan=3, sticky="w", pady=6)
+                  wraplength=340, foreground=theme.DIM).grid(row=7, column=0, columnspan=3, sticky="w", pady=6)
 
     # Canvas
     def draw_setup(self):
@@ -1721,5 +1720,28 @@ class App(tk.Tk):
         self.destroy()
 
 
+APP_ID = "Valence.EMCScanner"      # must match the shortcut made by tools\install_shortcut.ps1
+ICON = Path(__file__).resolve().parent / "assets" / "emc_scanner.ico"
+
+
+def _windows_identity():
+    """Own taskbar button and icon. Without this Windows groups the window with any other
+    app started by pythonw.exe (for example a pinned ClipBox) and shows that app's icon."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception:                                           # noqa: BLE001
+        pass
+
+
 def main(job: str | None = None):
-    App(job).mainloop()
+    _windows_identity()                     # before the first window exists
+    app = App(job)
+    if ICON.exists():
+        try:
+            app.iconbitmap(default=str(ICON))   # main window and every dialog
+        except tk.TclError:
+            pass
+    app.mainloop()

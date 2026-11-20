@@ -11,7 +11,17 @@ you can open any of it yourself.
 > A near-field scan shows **where** emissions come from and **how much a fix changed
 > them**. It is not a compliance measurement and does not predict a pass or fail.
 
-## Install (once)
+## Install (once per PC)
+
+Easiest, on any PC (this one or the laptop): clone the repo, then double-click
+**`Install EMC Scanner.bat`**. It makes `.venv`, installs the packages, and adds
+"Valence EMC Scanner" to the Start Menu and Desktop with its own icon and taskbar identity
+(AppUserModelID `Valence.EMCScanner`, set in `emcscan\app.py` and on the shortcut by
+`tools\install_shortcut.ps1`). Pin it: Start Menu > right-click > Pin to taskbar, or
+right-click the running window's taskbar button > Pin to taskbar. Needs Python 3.11+.
+Run it again after moving the folder. Icon source: `emcscan\assets\make_icon.py`.
+
+By hand:
 
 ```powershell
 cd C:\work\ve_emc_pipeline

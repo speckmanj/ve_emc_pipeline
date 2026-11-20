@@ -13,4 +13,7 @@ dependencies = ["numpy", "matplotlib", "pyvista", "opencv-python", "pyserial", "
 emcscan = "emcscan.cli:main"
 
 [tool.setuptools]
-packages = ["emcscan"]
+packages = ["emcscan", "emcscan.assets"]
+
+[tool.setuptools.package-data]
+emcscan = ["assets/*.ico", "assets/*.png"]
