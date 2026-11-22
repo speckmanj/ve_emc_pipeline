@@ -183,6 +183,13 @@ def registration(reg: dict) -> tuple[float, np.ndarray, float | None]:
         R = np.array([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]])
         return th, p[0] - R @ b[0], None
     vb, vp = b[1] - b[0], p[1] - p[0]
+    if np.linalg.norm(vp) < 1.0 or np.linalg.norm(vb) < 1.0:
+        # Two points on the same spot carry no angle (atan2(0, 0) = 0, so the board was
+        # silently placed at 0 deg and the rotation box ignored). Place from point 1 and
+        # the rotation box instead, and still report the spacing error so it gets re-picked.
+        th = math.radians(float(reg.get("rot_deg", 0)))
+        R = np.array([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]])
+        return th, p[0] - R @ b[0], float(np.linalg.norm(vp) - np.linalg.norm(vb))
     th = math.atan2(vp[1], vp[0]) - math.atan2(vb[1], vb[0])
     R = np.array([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]])
     t = p[:2].mean(axis=0) - R @ b[:2].mean(axis=0)

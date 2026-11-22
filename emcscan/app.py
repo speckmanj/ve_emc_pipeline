@@ -115,6 +115,7 @@ class App(tk.Tk):
         self.problems: list[str] = []
         self.photo = None
         self._gen = 0
+        self._done_gen = 0          # last recompute that finished; Start needs it == _gen
         self.est = 0.0
         self.scan_thread = None
         self.scan_stop = threading.Event()
@@ -361,12 +362,18 @@ class App(tk.Tk):
                 hts = heightmap.compute(cfg, s2) if heightmap.uses_heights(s2) else None
             plan = build_plan(cfg, hts)
             probs = check_plan(cfg, plan)
+            if st.get("file") and not (st.get("reg") or {}).get("p"):
+                # Loaded but not placed: the STEP is left out of the height map, and the flat
+                # rule (tallest_part) would quietly plan over parts it knows nothing about.
+                probs.insert(0, "STEP model loaded but not placed on the plate (Setup > Place "
+                                "STEP): its parts are not in the height map yet")
             est = estimate_seconds(cfg, plan) if plan else 0
             return b, key, hts, plan, probs, est
 
         def done(r):
             if gen != self._gen:
                 return
+            self._done_gen = gen
             self.board, self._board_key, self.heights, self.plan, self.problems, self.est = r
             self._after_compute()
         self.bg(work, done, "height map and plan")
@@ -622,7 +629,7 @@ class App(tk.Tk):
             self.say("[step] next: Setup > Place STEP (two board corners and where they are on the plate)")
             self.recompute()
             self.nb.select(self.tab_setup)
-            self.sub.select(self.sub_reg)
+            self.sub.select(self.sub_reg.tab)
         self.bg(work, done, "STEP load")
 
     def remove_step(self):
@@ -811,20 +818,57 @@ class App(tk.Tk):
         self._probe_art = []
 
         side = ttk.Frame(body, padding=4); body.add(side, weight=1)
+        # Buttons and the plan summary are packed at the BOTTOM first, so they always keep
+        # their room. Before (2026-11-22) they were packed last and a tall panel or a long
+        # problem list pushed "3D preview" off the window. The panels above scroll instead.
+        bf = ttk.Frame(side); bf.pack(side="bottom", fill="x")
+        ttk.Button(bf, text="Recompute path", command=self.recompute).pack(side="left")
+        ttk.Button(bf, text="3D preview", command=self.preview3d).pack(side="left", padx=4)
+        self.lbl_stats = ttk.Label(side, text="", justify="left", wraplength=380)
+        self.lbl_stats.pack(side="bottom", fill="x", pady=6)
         self.sub = ttk.Notebook(side); self.sub.pack(fill="both", expand=True)
-        self.sub_hts = ttk.Frame(self.sub, padding=6); self.sub.add(self.sub_hts, text="Heights")
-        self.sub_reg = ttk.Frame(self.sub, padding=6); self.sub.add(self.sub_reg, text="Place STEP")
-        self.sub_mach = ttk.Frame(self.sub, padding=6); self.sub.add(self.sub_mach, text="Machine")
-        self.sub_area = ttk.Frame(self.sub, padding=6); self.sub.add(self.sub_area, text="Scan area")
+        self.sub_hts = self._scroll_tab("Heights")
+        self.sub_reg = self._scroll_tab("Place STEP")
+        self.sub_mach = self._scroll_tab("Machine")
+        self.sub_area = self._scroll_tab("Scan area")
         self._build_heights_panel(self.sub_hts)
         self._build_reg_panel(self.sub_reg)
         self._build_machine_panel(self.sub_mach)
         self._build_area_panel(self.sub_area)
-        self.lbl_stats = ttk.Label(side, text="", justify="left", wraplength=380)
-        self.lbl_stats.pack(fill="x", pady=6)
-        bf = ttk.Frame(side); bf.pack(fill="x")
-        ttk.Button(bf, text="Recompute path", command=self.recompute).pack(side="left")
-        ttk.Button(bf, text="3D preview", command=self.preview3d).pack(side="left", padx=4)
+
+    def _scroll_tab(self, title: str) -> ttk.Frame:
+        """A Setup side tab whose content scrolls when it is taller than the window (the
+        Machine tab's Calibrate and Teach sections sat below the bottom edge on a laptop)."""
+        outer = ttk.Frame(self.sub)
+        self.sub.add(outer, text=title)
+        cv = tk.Canvas(outer, highlightthickness=0, bd=0, background=theme.BG)
+        sb = ttk.Scrollbar(outer, orient="vertical", command=cv.yview)
+        inner = ttk.Frame(cv, padding=6)
+        win = cv.create_window((0, 0), window=inner, anchor="nw")
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>", lambda e: cv.itemconfigure(win, width=e.width))
+
+        if not hasattr(self, "_scrollers"):
+            self._scrollers = {}
+            self.bind_all("<MouseWheel>", self._on_wheel, add="+")
+        self._scrollers[str(cv)] = (cv, inner)
+        inner.tab = outer               # what Notebook.select() needs
+        return inner
+
+    def _on_wheel(self, e):
+        """Scroll the side tab under the mouse (if any); the map keeps its own wheel zoom."""
+        w = self.winfo_containing(e.x_root, e.y_root)
+        while w is not None:
+            hit = getattr(self, "_scrollers", {}).get(str(w))
+            if hit:
+                cv, inner = hit
+                if inner.winfo_reqheight() > cv.winfo_height():
+                    cv.yview_scroll(int(-e.delta / 120), "units")
+                return
+            w = w.master
 
     # Heights panel
     def _build_heights_panel(self, f):
@@ -967,6 +1011,13 @@ class App(tk.Tk):
             messagebox.showinfo("Place STEP", "Set plate point 1 first.")
             return
         val = [round(float(x), 2), round(float(y), 2)]
+        other = p[1 - k] if k in (0, 1) and len(p) > 1 - k else None
+        if other and math.hypot(val[0] - other[0], val[1] - other[1]) < 5.0:
+            messagebox.showinfo("Place STEP",
+                                f"Plate point {k + 1} is the same spot as point {2 - k} "
+                                f"({val[0]:g}, {val[1]:g}). Jog the probe tip to the other "
+                                f"board corner first, then press Use probe position.")
+            return
         if k == len(p):
             p.append(val)
         else:
@@ -1039,7 +1090,9 @@ class App(tk.Tk):
         elif len(p) >= 2:
             th, tvec, err = heightmap.registration(reg)
             txt = (f"Placed: board turned {math.degrees(th):.1f} deg. The two points' spacing "
-                   f"differs by {err:+.2f} mm" + ("  (OK)" if abs(err) <= 1 else "  - TOO MUCH: re-pick"))
+                   f"differs by {err:+.2f} mm" + ("  (OK)" if abs(err) <= 1 else "  - TOO MUCH: re-pick")
+                   + ". With two points the angle comes from the points and the rotation box "
+                   "is not used; Forget plate points to place with one point and the box.")
         elif len(p) == 1:
             txt = f"Placed with one point and {reg.get('rot_deg', 0)} deg. A second point checks the angle."
         else:
@@ -1420,6 +1473,12 @@ class App(tk.Tk):
                                                        "note": note})
             self.save_setup()
 
+    def _in_map(self, x, y) -> bool:
+        if self.heights is None:
+            return False
+        x0, x1, y0, y1 = self.heights.extent
+        return x0 <= x <= x1 and y0 <= y <= y1
+
     def goto_plate(self, x, y):
         cfg = self.cfg
         if self.machine.pos is None or not self.machine.homed:
@@ -1430,13 +1489,18 @@ class App(tk.Tk):
         h = max(h0, need + 0.05)
         nx, ny, nz = geometry.plate_to_nozzle(cfg, x, y, h)
         pos = self.machine.pos
-        if self.heights is not None:
-            cx, cy = geometry.nozzle_to_plate_xy(cfg, pos[0], pos[1])
+        cx, cy = geometry.nozzle_to_plate_xy(cfg, pos[0], pos[1])
+        if self.heights is not None and self._in_map(cx, cy) and self._in_map(x, y):
             via = geometry.plate_to_nozzle(cfg, x, y, self.heights.via(cx, cy, x, y) + 0.05)[2]
         else:
+            # The height map only covers the scan area plus the probe's reach. Outside it the
+            # map just repeats its edge, so it knows nothing there: cross at safe_z.
             via = float(cfg["printer"]["safe_z"])
+        warn = ("\n\nWARNING: this spot is outside the height map (scan area plus probe reach), "
+                "so the parts there are unknown. Make sure nothing taller than "
+                f"{h:.1f} mm is under it." if self.heights is not None and not self._in_map(x, y) else "")
         if not messagebox.askokcancel("Send probe", f"Move the probe tip over ({x:.1f}, {y:.1f}) at "
-                                      f"{h:.1f} mm above the board?"):
+                                      f"{h:.1f} mm above the board?{warn}"):
             return
         self.mach(lambda p: p.move_to(nx, ny, nz, via_z=via), "send probe")
 
@@ -1483,6 +1547,11 @@ class App(tk.Tk):
 
     def start_scan(self, resume: str | None = None):
         if self.cfg is None or self.scanning():
+            return
+        if self._done_gen != self._gen:
+            messagebox.showwarning("Start scan", "The plan is still being computed, or the last "
+                                                 "update failed. Wait for SAFE TO RUN (or press "
+                                                 "Recompute path), then start.")
             return
         if self.problems:
             messagebox.showerror("Start scan", "The plan is not safe:\n- " + "\n- ".join(self.problems))
@@ -1710,8 +1779,19 @@ class App(tk.Tk):
             self.scan_stop.set()
             self.scan_thread.join(timeout=30)
         try:
-            if self.machine.printer is not None and self.machine.homed:
-                self.machine.printer.lift()
+            m = self.machine
+            if m.printer is not None and m.homed:
+                # Take the machine lock: a jog or Send probe still running in the background
+                # would otherwise talk to the printer at the same time as the park.
+                if m.lock.acquire(timeout=10):
+                    try:
+                        self.say("[printer] closing: lifting Z, then homing X and Y (Z stays)")
+                        self.update_idletasks()
+                        m.printer.park()
+                    finally:
+                        m.lock.release()
+                else:
+                    self.say("[printer] still busy after 10 s: closing without parking")
         except Exception:                                       # noqa: BLE001
             pass
         self.disconnect()

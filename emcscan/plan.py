@@ -152,6 +152,19 @@ def check_plan(cfg, plan: list[ScanPoint]) -> list[str]:
     xmin, xmax, ymin, ymax = geometry.plate_extent(cfg)
     if s["x_min"] < xmin or s["x_max"] > xmax or s["y_min"] < ymin or s["y_max"] > ymax:
         errs.append("scan area extends beyond the plate")
+    if str(pr.get("type", "sim")) != "sim":
+        # Real hardware: refuse to run on template calibration. Before 2026-11-22 a job could
+        # scan with the origin still at the template value and the board top a guess from the
+        # nominal plate thickness: the probe would go to the wrong place at the wrong height.
+        from .config import DEFAULTS
+        cal, dc = cfg["calibration"], DEFAULTS["calibration"]
+        if (float(cal.get("origin_x", dc["origin_x"])), float(cal.get("origin_y", dc["origin_y"]))) \
+                == (float(dc["origin_x"]), float(dc["origin_y"])):
+            errs.append(f"plate origin is still the template value ({dc['origin_x']:g}, "
+                        f"{dc['origin_y']:g}): calibrate it (Setup > Machine) before scanning")
+        if not pr.get("has_nozzle", True) and "z_board_top" not in cal:
+            errs.append("board top Z is not calibrated (Setup > Machine > Set board top): probe "
+                        "heights would be a guess from the nominal plate thickness")
     return errs
 
 

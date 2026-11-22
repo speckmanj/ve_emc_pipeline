@@ -148,7 +148,9 @@ def set_value(path: str | Path, section: str, key: str, value) -> None:
     """
     path = Path(path)
     lines = path.read_text(encoding="utf-8").splitlines()
-    header = re.compile(r"^\s*\[([^\[\]]+)\]\s*(#.*)?$")
+    # [[array.tables]] (the analyzer bands) end the section before them too; without the
+    # optional second bracket a key missing from [analyzer] could land in a band's table.
+    header = re.compile(r"^\s*\[(\[?)([^\[\]]+)\]\]?\s*(#.*)?$")
     keyline = re.compile(rf"^\s*{re.escape(key)}\s*=")
     start = end = None
     for i, line in enumerate(lines):
@@ -156,7 +158,7 @@ def set_value(path: str | Path, section: str, key: str, value) -> None:
         if m:
             if start is not None and end is None:
                 end = i
-            if m.group(1).strip() == section:
+            if not m.group(1) and m.group(2).strip() == section:
                 start = i
     if start is None:
         lines += ["", f"[{section}]", f"{key} = {_fmt(value)}"]

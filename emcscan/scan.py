@@ -87,6 +87,17 @@ def run_scan(cfg, resume: str | None = None, live: bool = False, printer=None, a
 
     if resume:
         rw = RunWriter.open_existing(Path(resume))
+        # Points are stored by index only, so the plan must be the one the run started with.
+        # A changed area, step, height or band list would file new readings under old spots.
+        from .runstore import read_plan
+        saved = np.atleast_1d(read_plan(rw.dir))
+        cur = np.array([(p.x, p.y, p.ht) for p in plan]) if plan else np.zeros((0, 3))
+        meta0 = json.loads((rw.dir / "meta.json").read_text())
+        if (len(saved) != len(plan)
+                or not np.allclose(np.column_stack([saved["x"], saved["y"], saved["ht"]]), cur, atol=0.01)
+                or len(meta0.get("bands", [])) != len(cfg["analyzer"]["bands"])):
+            raise ScanRefused([f"the job changed since {rw.dir.name} started (scan area, step, "
+                               "heights, STEP placement or bands): start a new run instead of resuming"])
         done = {int(r["idx"]) for r in read_points(rw.dir)}
         log(f"[scan] resuming {rw.dir.name}: {len(done)}/{len(plan)} points already done")
     else:

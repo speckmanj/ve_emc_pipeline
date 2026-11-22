@@ -28,6 +28,10 @@ from .plan import move_time
 
 
 class Printer:
+    # True when send(wait=True) itself returns only after the motion is done (serial with
+    # M400, Moonraker, the simulator). False (Bambu): we have to sleep the estimated time.
+    blocking = False
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.pc = cfg["printer"]
@@ -83,14 +87,28 @@ class Printer:
         return self.pos
 
     def lift(self):
-        """Raise to safe_z (used at the end and on Ctrl+C)."""
+        """Raise to safe_z (used at the end and on Ctrl+C). Z only: the command carries no
+        X or Y, so a stale remembered position can never send the head somewhere else."""
         sz = float(self.pc["safe_z"])
+        fz = self.pc["feed_z"]
         if self.pos is None:
-            self.send(f"G91\nG1 Z10 F{self.pc['feed_z']:.0f}\nG90", wait=True)
-            self._sleep_worst_case()
+            self.send(f"G91\nG1 Z10 F{fz:.0f}\nG90", wait=True)
+            if not self.blocking:
+                self._sleep_worst_case()
             return
-        if self.pos[2] < sz:
-            self.move_to(self.pos[0], self.pos[1], sz)
+        x, y, z = self.pos
+        if z < sz:
+            self._line(f"G90\nG1 Z{sz:.3f} F{fz:.0f}", (x, y, z), (x, y, sz), fz)
+            self.pos = (x, y, sz)
+
+    def park(self):
+        """On close: clear the board in Z (straight up, never sideways), then home X and Y
+        only. Z stays where it is: homing Z would drive the probe down to the switch."""
+        self.lift()
+        self.send("G28 X Y", wait=True)
+        self.pos = None
+        if not self.blocking:                   # serial/Moonraker already waited (M400)
+            self._sleep_worst_case(extra=10.0)
 
     def _line(self, gcode, start, end, feed):
         self.send(gcode, wait=True)
@@ -106,6 +124,7 @@ class Printer:
 
 class SimPrinter(Printer):
     """Pretends to move. time_scale 0 = instant, 1 = real time."""
+    blocking = True
 
     def connect(self):
         print("[printer] simulator")
@@ -135,6 +154,23 @@ class SimPrinter(Printer):
 
 class SerialGcodePrinter(Printer):
     """Marlin-style printer on a COM port. Every line waits for 'ok'."""
+    blocking = True
+    POS_TOL = 0.05                              # mm; M114 prints 2 decimals
+
+    def move_to(self, x, y, z, via_z=None):
+        """Move, then ask the printer where it really is. Marlin clamps a move past its soft
+        limits WITHOUT an error, so the remembered position (and every reading logged at it)
+        would silently be wrong. Refuse to carry on instead."""
+        super().move_to(x, y, z, via_z)
+        want = self.pos
+        got = self.where()
+        if got is not None and want is not None and got is not want:
+            off = max(abs(g - w) for g, w in zip(got, want))
+            if off > self.POS_TOL:
+                raise RuntimeError(
+                    f"printer stopped at X{got[0]:.2f} Y{got[1]:.2f} Z{got[2]:.2f}, not at "
+                    f"X{want[0]:.2f} Y{want[1]:.2f} Z{want[2]:.2f} ({off:.2f} mm off): a soft "
+                    f"limit clamped the move. Check the calibration and the scan area.")
 
     def connect(self):
         import serial
@@ -201,6 +237,7 @@ class SerialGcodePrinter(Printer):
 
 class MoonrakerPrinter(Printer):
     """Klipper via Moonraker's HTTP API. The request returns when the G-code is done."""
+    blocking = True
 
     def connect(self):
         with urllib.request.urlopen(self.pc["url"].rstrip("/") + "/printer/info", timeout=5) as r:
