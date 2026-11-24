@@ -12,3 +12,6 @@ jobs/demo_photo.*
 *.STP
 .*_top.npz
 .*_bot.npz
+# bench test output and Git Bash crash dumps (2026-11-24)
+tests/gantry_noise/out/
+*.stackdump
