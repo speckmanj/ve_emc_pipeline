@@ -149,7 +149,7 @@ def cmd_live(a):
 
 def cmd_report(a):
     from .report import make_report
-    p = make_report(a.run)
+    p = make_report(a.run, a.unit)
     if a.open:
         import webbrowser
         webbrowser.open(p.as_uri())
@@ -157,7 +157,7 @@ def cmd_report(a):
 
 def cmd_compare(a):
     from .compare import compare
-    compare(a.before, a.after)
+    compare(a.before, a.after, a.unit)
 
 
 def cmd_app(a):
@@ -251,8 +251,10 @@ def main(argv=None):
     sp.add_argument("--screenshot", default=None, help="save one image and exit")
     sp = add("report", cmd_report, "heat maps, hotspots, spectra and report.html for a run")
     sp.add_argument("run"); sp.add_argument("--open", action="store_true")
+    sp.add_argument("--unit", default=None, help="dBuV or dBm (default: the job's [report] unit, dBuV)")
     sp = add("compare", cmd_compare, "before/after comparison of two runs on the same grid")
     sp.add_argument("before"); sp.add_argument("after")
+    sp.add_argument("--unit", default=None, help="dBuV or dBm (default: the after run's [report] unit, dBuV)")
     sp = add("app", cmd_app, "the desktop app: Prep, Setup, Run, Results in one window")
     sp.add_argument("config", nargs="?", default=None, help="job file to open (default: the last one)")
     sp = add("preview", cmd_preview, "3D view of a job: board, tall parts, probe path by tip height")

@@ -100,6 +100,9 @@ DEFAULTS: dict = {
     "output": {
         "runs_dir": "runs",
     },
+    "report": {
+        "unit": "dBuV",             # dBuV (default, dBm + 107 at the probe output) or dBm
+    },
 }
 
 

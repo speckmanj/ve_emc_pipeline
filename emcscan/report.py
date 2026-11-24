@@ -11,6 +11,11 @@ Writes runs/<run>/report/:
     scan.npz                all arrays for your own analysis (numpy.load)
     report.html             everything above in one file (open in a browser, print to PDF)
 
+Units: levels are reported in dBµV at the probe output by default (dBm + 107 in 50 ohm),
+the unit EMC labs use. It is still a relative near-field level, NOT dBµV/m field strength,
+so it never goes against an FCC/CISPR limit line. Raw run data stay in dBm (what the
+analyzer returns); [report] unit = "dBm" in the job file, or --unit dBm, reports in dBm.
+
 How the numbers are made:
     peak level per point  = max over the band of that point's sweep
     max-hold spectrum     = max over all points, per frequency bin
@@ -32,6 +37,38 @@ import matplotlib.pyplot as plt                         # noqa: E402
 import numpy as np                                      # noqa: E402
 
 from .runstore import Run                               # noqa: E402
+
+UNITS = {"dbuv": ("dBuV", 107.0, "dBµV"), "dbm": ("dBm", 0.0, "dBm")}   # key, offset from dBm, label
+
+
+def resolve_unit(run_dir, unit: str | None = None) -> tuple[str, float, str]:
+    """(key, offset added to dBm, label). unit None: [report] unit from the run's config.toml,
+    else the default (dBµV)."""
+    if unit is None:
+        try:
+            from . import config
+            unit = config.load(Path(run_dir) / "config.toml")["report"]["unit"]
+        except Exception:                                   # noqa: BLE001
+            unit = "dBuV"
+    k = str(unit).lower().replace("µ", "u").replace("μ", "u")
+    if k not in UNITS:
+        raise ValueError(f"unknown report unit {unit!r}: use dBuV or dBm")
+    return UNITS[k]
+
+
+def apply_unit(run: Run, offset: float) -> None:
+    """Shift the run's levels in place (the raw files are untouched)."""
+    if offset:
+        run.traces = [t + np.float32(offset) for t in run.traces]
+
+
+def unit_note(label: str) -> str:
+    if label == "dBm":
+        return "Levels in dBm at the probe output (50 ohm)."
+    return ("Levels in dBµV at the probe output (dBm + 107 in 50 ohm). These are relative "
+            "near-field levels for locating sources and comparing scans; they are not "
+            "field strength (dBµV/m) and cannot be compared with a radiated-emission limit.")
+
 
 DISCLAIMER = ("Near-field confidence scan. This shows where emissions come from and how "
               "they change after a fix. It is not a compliance measurement and does not "
@@ -75,8 +112,8 @@ def hotspots(run: Run, k: int, n=5, radius_mm=6.0, min_db=10.0):
                     j = row_of[(iz, iy, ix)]
                     cands.append({"band": run.bands[k]["name"], "x": float(run.xs[ix]),
                                   "y": float(run.ys[iy]), "h": float(run.hs[iz]),
-                                  "level_dbm": float(v), "freq_mhz": float(pf[j]) / 1e6, "row": j})
-    cands.sort(key=lambda s: -s["level_dbm"])
+                                  "level": float(v), "freq_mhz": float(pf[j]) / 1e6, "row": j})
+    cands.sort(key=lambda s: -s["level"])
     return cands[:n]
 
 
@@ -130,7 +167,7 @@ def _png(fig, path: Path) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def view3d(run: Run, path: Path) -> str | None:
+def view3d(run: Run, path: Path, label: str = "dBm") -> str | None:
     try:
         import pyvista as pv
     except ImportError:
@@ -148,9 +185,9 @@ def view3d(run: Run, path: Path) -> str | None:
     for iz, h in enumerate(run.hs):
         X, Y = np.meshgrid(run.xs, run.ys)
         grid = pv.StructuredGrid(X, Y, np.full_like(X, h, dtype=float))
-        grid["dBm"] = np.nan_to_num(allpk[iz], nan=vmin).ravel(order="F")
-        pl.add_mesh(grid, scalars="dBm", cmap="inferno", clim=[vmin, vmax], opacity=0.85,
-                    scalar_bar_args={"title": "peak dBm"})
+        grid["level"] = np.nan_to_num(allpk[iz], nan=vmin).ravel(order="F")
+        pl.add_mesh(grid, scalars="level", cmap="inferno", clim=[vmin, vmax], opacity=0.85,
+                    scalar_bar_args={"title": f"peak {label}"})
     pl.show_grid(xtitle="X (mm)", ytitle="Y (mm)", ztitle="h (mm)", n_zlabels=3, fmt="%.0f")
     from .runstore import front_view
     front_view(pl, box, float(run.hs.max()))
@@ -158,15 +195,17 @@ def view3d(run: Run, path: Path) -> str | None:
     return base64.b64encode(path.read_bytes()).decode()
 
 
-def make_report(run_dir: str | Path) -> Path:
+def make_report(run_dir: str | Path, unit: str | None = None) -> Path:
     run = Run(run_dir)
     if len(run.done_idx) == 0:
         raise RuntimeError("no measured points in this run yet")
+    ukey, uoff, U = resolve_unit(run.dir, unit)
+    apply_unit(run, uoff)
     out = run.dir / "report"; out.mkdir(exist_ok=True)
     meta = run.meta
     sections = []
     all_spots = []
-    npz = {"x": run.xs, "y": run.ys, "h": run.hs, "done_idx": run.done_idx}
+    npz = {"x": run.xs, "y": run.ys, "h": run.hs, "done_idx": run.done_idx, "unit": U}
 
     for k, band in enumerate(run.bands):
         fr, tr = run.freqs[k], run.traces[k]
@@ -181,11 +220,11 @@ def make_report(run_dir: str | Path) -> Path:
         # max-hold spectrum
         fig, ax = plt.subplots(figsize=(10, 3.6))
         ax.plot(fr / 1e6, maxhold, lw=0.9, label="max-hold (all points)")
-        ax.axhline(floor, color="gray", ls="--", lw=0.8, label=f"noise floor {floor:.1f} dBm")
+        ax.axhline(floor, color="gray", ls="--", lw=0.8, label=f"noise floor {floor:.1f} {U}")
         for f, lv in tops:
             ax.annotate(f"{f / 1e6:.2f} MHz", (f / 1e6, lv), textcoords="offset points",
                         xytext=(0, 6), ha="center", fontsize=8)
-        ax.set_xlabel("MHz"); ax.set_ylabel("dBm"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+        ax.set_xlabel("MHz"); ax.set_ylabel(U); ax.grid(alpha=0.3); ax.legend(fontsize=8)
         ax.set_title(f"{band['name']}: max-hold spectrum")
         imgs = [("Max-hold spectrum", _png(fig, out / f"maxhold_b{k}.png"))]
 
@@ -196,14 +235,14 @@ def make_report(run_dir: str | Path) -> Path:
             fig, ax = plt.subplots(figsize=(7, 6))
             sp = [s for s in spots if s["h"] == h]
             _map_axes(run, ax, pg[iz], f"{band['name']}  peak level  h = {h:g} mm", vmin, vmax, sp,
-                      iz=iz)
+                      iz=iz, label=U)
             imgs.append((f"Peak level, h = {h:g} mm", _png(fig, out / f"map_h{h:g}_b{k}.png")))
         # one map per top frequency, lowest height
         for f, _ in tops:
             g = run.freq_grid(k, f)
             fig, ax = plt.subplots(figsize=(7, 6))
             _map_axes(run, ax, g[0], f"{f / 1e6:.2f} MHz  h = {run.hs[0]:g} mm",
-                      np.nanmin(g), np.nanmax(g), iz=0)
+                      np.nanmin(g), np.nanmax(g), iz=0, label=U)
             imgs.append((f"Where {f / 1e6:.2f} MHz comes from",
                          _png(fig, out / f"freqmap_h{run.hs[0]:g}_b{k}_{f / 1e6:.0f}MHz.png")))
         # spectra at the hotspots
@@ -212,7 +251,7 @@ def make_report(run_dir: str | Path) -> Path:
             ax.plot(fr / 1e6, tr[s["row"]], lw=0.8,
                     label=f"#{n} ({s['x']:.0f}, {s['y']:.0f}) h {s['h']:g}")
         ax.axhline(floor, color="gray", ls="--", lw=0.8)
-        ax.set_xlabel("MHz"); ax.set_ylabel("dBm"); ax.grid(alpha=0.3)
+        ax.set_xlabel("MHz"); ax.set_ylabel(U); ax.grid(alpha=0.3)
         if spots:
             ax.legend(fontsize=8)
         ax.set_title(f"{band['name']}: spectra at the strongest spots"
@@ -222,12 +261,13 @@ def make_report(run_dir: str | Path) -> Path:
 
     np.savez_compressed(out / "scan.npz", **npz)
     with open(out / "hotspots.csv", "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["band", "x", "y", "h", "level_dbm", "freq_mhz"])
+        w = csv.DictWriter(fh, fieldnames=["band", "x", "y", "h", f"level_{ukey.lower()}", "freq_mhz"])
         w.writeheader()
         for s in all_spots:
-            w.writerow({k: (round(v, 2) if isinstance(v, float) else v)
+            w.writerow({(f"level_{ukey.lower()}" if k == "level" else k):
+                        (round(v, 2) if isinstance(v, float) else v)
                         for k, v in s.items() if k != "row"})
-    v3d = view3d(run, out / "view3d.png")
+    v3d = view3d(run, out / "view3d.png", U)
 
     # ---- HTML ----
     n_over = sum(int(r["overload"]) for r in run.points)
@@ -244,7 +284,8 @@ def make_report(run_dir: str | Path) -> Path:
         ("Points raised over tall parts", meta.get("n_raised", 0)),
         ("Points flagged possible overload", n_over)])
     body = [f"<h1>EMC near-field scan: {esc(str(meta.get('job')))}</h1>",
-            f"<p class='note'>{esc(DISCLAIMER)}</p>", f"<table class='meta'>{rows}</table>"]
+            f"<p class='note'>{esc(DISCLAIMER)}</p>", f"<p class='note'>{esc(unit_note(U))}</p>",
+            f"<table class='meta'>{rows}</table>"]
     if n_over:
         body.append("<p class='warn'>Some points read above the overload level with the LNA on. "
                     "Rescan with analyzer.lna = \"off\" to confirm those levels.</p>")
@@ -269,13 +310,13 @@ def make_report(run_dir: str | Path) -> Path:
     if v3d:
         body.append(f"<h2>3D overview</h2><img src='data:image/png;base64,{v3d}'>")
     for band, floor, tops, spots, imgs in sections:
-        body.append(f"<h2>{esc(band['name'])}</h2><p>Noise floor {floor:.1f} dBm. Strongest "
-                    "frequencies: " + (", ".join(f"{f / 1e6:.2f} MHz ({lv:.1f} dBm)" for f, lv in tops)
+        body.append(f"<h2>{esc(band['name'])}</h2><p>Noise floor {floor:.1f} {U}. Strongest "
+                    "frequencies: " + (", ".join(f"{f / 1e6:.2f} MHz ({lv:.1f} {U})" for f, lv in tops)
                                        or "none above floor + 6 dB") + "</p>")
         body.append("<table><tr><th>#</th><th>X mm</th><th>Y mm</th><th>h mm</th>"
-                    "<th>Level dBm</th><th>Freq MHz</th></tr>" + "".join(
+                    f"<th>Level {U}</th><th>Freq MHz</th></tr>" + "".join(
                         f"<tr><td>{n}</td><td>{s['x']:.1f}</td><td>{s['y']:.1f}</td>"
-                        f"<td>{s['h']:g}</td><td>{s['level_dbm']:.1f}</td><td>{s['freq_mhz']:.2f}</td></tr>"
+                        f"<td>{s['h']:g}</td><td>{s['level']:.1f}</td><td>{s['freq_mhz']:.2f}</td></tr>"
                         for n, s in enumerate(spots, 1)) + "</table>")
         for title, b64 in imgs:
             body.append(f"<h3>{esc(title)}</h3><img src='data:image/png;base64,{b64}'>")
