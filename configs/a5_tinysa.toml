@@ -41,6 +41,7 @@ feed_xy = 3000.0
 feed_z = 600.0
 accel = 500.0
 settle_s = 0.15
+quiet_sweep = true              # drivers off during each sweep: H20 gantry noise +28 dB -> about 2 dB (2026-11-24)
 
 [calibration]                   # set in the app (Setup tab > Machine)
 plate_cal_date = "2026-11-23 10:37"
