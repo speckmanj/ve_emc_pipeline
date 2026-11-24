@@ -39,12 +39,68 @@ class Stopped(Exception):
     pass
 
 
+# ---- analyzer auto-recovery ----------------------------------------------------------
+# 2026-11-23, first real scan: the TinySA stopped answering a `scan` about every 160
+# points (7 min) and each stall ended the run. Now a failed point is retried after
+# reopening the analyzer, so an unattended scan rides through it. Limits keep a truly
+# dead analyzer from looping forever; every event goes into meta.json ("recoveries").
+RECONNECT_WAITS_S = (0.0, 10.0, 30.0)       # before each reconnect attempt
+
+
+def _wait(seconds: float, stop) -> None:
+    end = time.time() + seconds
+    while True:
+        if stop is not None and stop.is_set():
+            raise Stopped()
+        left = end - time.time()
+        if left <= 0:
+            return
+        time.sleep(min(0.5, left))
+
+
+def sweep_point(cfg, analyzer, p, rec: dict, stop=None, log=print):
+    """All bands at point p. On an analyzer error: reconnect and retry the point, up to
+    analyzer.point_retries times per point and analyzer.max_recoveries per run."""
+    per_point = int(cfg["analyzer"].get("point_retries", 3))
+    per_run = int(cfg["analyzer"].get("max_recoveries", 25))
+    attempt = 0
+    while True:
+        try:
+            return [analyzer.sweep(band, (p.x, p.y, p.ht)) for band in cfg["analyzer"]["bands"]]
+        except Exception as e:                              # noqa: BLE001
+            if attempt >= per_point or len(rec["events"]) >= per_run:
+                why = "this point" if attempt >= per_point else "this run"
+                raise RuntimeError(f"analyzer kept failing ({e}); gave up after the recovery "
+                                   f"limit for {why}. Resume the run once it is sorted.") from e
+            attempt += 1
+            ev = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "idx": int(p.idx),
+                  "done": rec.get("done", 0), "error": str(e)[:200], "ok": False}
+            rec["events"].append(ev)
+            log(f"[scan] analyzer problem at point {p.idx} ({str(e)[:120]}); "
+                f"reconnecting (recovery {len(rec['events'])}/{per_run}, try {attempt}/{per_point})")
+            last = e
+            for w in RECONNECT_WAITS_S:
+                _wait(w, stop)
+                try:
+                    analyzer.reconnect()
+                    ev["ok"] = True
+                    log("[scan] analyzer reconnected; repeating the point")
+                    break
+                except Exception as e2:                     # noqa: BLE001
+                    last = e2
+                    log(f"[scan] reconnect failed ({str(e2)[:120]})")
+            if not ev["ok"]:
+                raise RuntimeError(f"analyzer did not come back after {len(RECONNECT_WAITS_S)} "
+                                   f"reconnect tries ({last}). Check USB and power, then "
+                                   f"resume the run.") from last
+
+
 def fmt_s(s: float) -> str:
     s = int(max(s, 0))
     return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
-def decide_lna(cfg, printer, analyzer, plan, heights=None, stop=None, log=print):
+def decide_lna(cfg, printer, analyzer, plan, heights=None, stop=None, log=print, rec=None):
     """Returns (lna_on, prescan_peak, last_point_visited)."""
     mode = str(cfg["analyzer"]["lna"]).lower()
     if mode in ("on", "true"):
@@ -65,8 +121,7 @@ def decide_lna(cfg, printer, analyzer, plan, heights=None, stop=None, log=print)
             raise Stopped()
         printer.move_to(p.nx, p.ny, p.nz, via_z=travel_z(cfg, heights, prev, p))
         prev = p
-        for band in cfg["analyzer"]["bands"]:
-            _, lv = analyzer.sweep(band, (p.x, p.y, p.ht))
+        for _, lv in sweep_point(cfg, analyzer, p, rec if rec is not None else {"events": []}, stop, log):
             peak = max(peak, float(np.max(lv)))
     on = peak < float(cfg["analyzer"]["lna_threshold_dbm"])
     log(f"[scan] pre-scan peak {peak:.1f} dBm -> LNA {'ON' if on else 'OFF'}")
@@ -119,6 +174,7 @@ def run_scan(cfg, resume: str | None = None, live: bool = False, printer=None, a
     printer = printer or make_printer(cfg)
     analyzer = analyzer or make_analyzer(cfg)
     state = "error"
+    rec = {"events": []}
     try:
         if own_p:
             printer.connect()
@@ -136,7 +192,7 @@ def run_scan(cfg, resume: str | None = None, live: bool = False, printer=None, a
             lna_on = bool(meta["lna_on"])
             analyzer.set_lna(lna_on)
         else:
-            lna_on, pre_peak, prev = decide_lna(cfg, printer, analyzer, plan, heights, stop, log)
+            lna_on, pre_peak, prev = decide_lna(cfg, printer, analyzer, plan, heights, stop, log, rec)
             analyzer.set_lna(lna_on)
             rw.write_meta({
                 "job": cfg["job"]["name"], "started": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -159,11 +215,17 @@ def run_scan(cfg, resume: str | None = None, live: bool = False, printer=None, a
             else:
                 printer.move_to(p.nx, p.ny, p.nz, via_z=travel_z(cfg, heights, prev, p))
             prev = p
-            traces = []
-            for k, band in enumerate(cfg["analyzer"]["bands"]):
-                f, lv = analyzer.sweep(band, (p.x, p.y, p.ht))
+            rec["done"] = len(done)
+            quiet = bool(cfg["printer"].get("quiet_sweep", False))
+            if quiet:
+                printer.quiet()
+            try:
+                traces = sweep_point(cfg, analyzer, p, rec, stop, log)
+            finally:
+                if quiet:
+                    printer.wake()
+            for k, (f, _) in enumerate(traces):
                 rw.save_freqs(k, f)
-                traces.append((f, lv))
             overload = lna_on and max(float(np.max(lv)) for _, lv in traces) > overload_lvl
             rw.append(p, traces, lna_on, overload)
             done.add(p.idx)
@@ -206,9 +268,14 @@ def run_scan(cfg, resume: str | None = None, live: bool = False, printer=None, a
             meta = json.loads((rw.dir / "meta.json").read_text())
             meta["ended"] = time.strftime("%Y-%m-%d %H:%M:%S")
             meta["state"] = state
+            if rec["events"]:
+                meta["recoveries"] = meta.get("recoveries", []) + rec["events"]
             rw.write_meta(meta)
         except OSError:
             pass
+    if rec["events"]:
+        log(f"[scan] analyzer recoveries this session: {len(rec['events'])} "
+            f"(listed in meta.json)")
     log(f"[scan] {state}: {len(done)}/{len(plan)} points in {rw.dir}")
     if on_point is not None:
         on_point({"state": state, "done": len(done), "total": len(plan), "run": str(rw.dir)})

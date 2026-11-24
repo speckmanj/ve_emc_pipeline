@@ -12,7 +12,8 @@ There are three frames. Keeping them straight is most of the job:
 
 3. PRINTER frame (what the printer is told): nozzle X, Y, Z in printer coordinates.
    `emcscan calibrate` measures where marker 0 is (origin_x/y), the plate rotation
-   (angle_deg) and the plate top height (z_plate_top).
+   (angle_deg) and the plate top height (z_plate_top). The tip visits the back pair
+   (markers 3 and 2) and marker 0 is worked out from the plate layout.
 
     nozzle_xy = origin + R(angle) * plate_xy
     nozzle_z  = board_top_z + h - probe.offset_z
@@ -105,3 +106,31 @@ def nozzle_to_plate_xy(cfg, nx: float, ny: float) -> tuple[float, float]:
     a = math.radians(cal["angle_deg"])
     dx, dy = nx - cal["origin_x"], ny - cal["origin_y"]
     return (math.cos(a) * dx + math.sin(a) * dy, -math.sin(a) * dx + math.cos(a) * dy)
+
+
+# Markers used to calibrate the plate. The back pair by default: with the probe mounted
+# (no nozzle) the A5 cannot reach the front markers 0 and 1 (they sit in front of Y home).
+CAL_PAIR_DEFAULT = (3, 2)       # back-left (4 dimples), then back-right (3 dimples)
+PLATE_CAL_KEYS = ("origin_x", "origin_y", "angle_deg")
+
+
+def cal_pair(cfg) -> tuple[int, int]:
+    p = cfg.get("calibration", {}).get("cal_markers", CAL_PAIR_DEFAULT)
+    return int(p[0]), int(p[1])
+
+
+def plate_cal_from_pair(cfg, i: int, pos_i, j: int, pos_j) -> tuple[float, float, float, float]:
+    """Nozzle X/Y with the tip over marker i, then over marker j -> where marker 0 is
+    (origin_x, origin_y), the plate rotation (angle_deg) and the length error in mm
+    (measured i-to-j distance minus the true one; over 1 mm = a marker or a jog is off).
+    Marker 0 itself never has to be visited."""
+    c = marker_centers_plate(cfg)
+    (pix, piy), (pjx, pjy) = c[i], c[j]
+    vx, vy = pos_j[0] - pos_i[0], pos_j[1] - pos_i[1]
+    ux, uy = pjx - pix, pjy - piy
+    a = math.atan2(vy, vx) - math.atan2(uy, ux)
+    a = math.atan2(math.sin(a), math.cos(a))                    # wrap to -180..180
+    ox = pos_i[0] - (math.cos(a) * pix - math.sin(a) * piy)
+    oy = pos_i[1] - (math.sin(a) * pix + math.cos(a) * piy)
+    err = math.hypot(vx, vy) - math.hypot(ux, uy)
+    return round(ox, 2), round(oy, 2), round(math.degrees(a), 3), err

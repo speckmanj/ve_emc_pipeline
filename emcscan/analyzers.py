@@ -33,6 +33,17 @@ class Analyzer:
     def close(self): ...
     def info(self) -> str: return type(self).__name__
 
+    def reconnect(self):
+        """Drop the link and open it again, keeping the LNA setting (used by the scan's
+        auto-recovery when the analyzer stops answering)."""
+        lna = self.lna_on
+        try:
+            self.close()
+        except Exception:                                   # noqa: BLE001
+            pass
+        self.connect()
+        self.set_lna(lna)
+
 
 class TinySA(Analyzer):
     """Notes from the 2026-11-12 bench test (Ultra+ ZS407, fw v1.4-200):
@@ -169,6 +180,20 @@ class TinySA(Analyzer):
             self.lna_on = False
         finally:
             self.ser.close()
+
+    def reconnect(self):
+        """Close the port WITHOUT sending anything (the unit is not answering, so the
+        polite close() would just time out three times), wait, reopen and restore the
+        LNA. 2026-11-23: on the first real scan the TinySA stopped answering a `scan`
+        about every 160 points (7 min); a fresh port is the cure being tried."""
+        lna = self.lna_on
+        try:
+            self.ser.close()
+        except Exception:                                   # noqa: BLE001
+            pass
+        time.sleep(2.0)
+        self.connect()
+        self.set_lna(lna)
 
     def info(self):
         hw = f", {self.hw}" if getattr(self, "hw", "") else ""

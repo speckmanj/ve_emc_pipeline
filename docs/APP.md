@@ -30,7 +30,7 @@ heights, the lowest legal tip height, or the photo only. The path is colored by 
 | Scan area by hand | Click mode **Drag scan area**, or type it in the **Scan area** tab |
 | Low-profile board, no STEP | **Heights** tab: master height = tallest part |
 | Tall parts, no STEP (or extras: cables, nylon screws, heatsinks) | **Machine** tab: untick the guard, jog the tip a paper's gap above the part top, **Mark tall part here** (two or three corners for big parts). Or click mode **Add mark** / **Drag box** and type the height |
-| Calibrate | **Machine** tab: Home, then tip over marker 0 (origin), marker 1 (angle), tip on paper on the board top (board top) |
+| Calibrate | **Machine** tab: Home, then tip over marker 3 (back-left, 4 dimples), then marker 2 (back-right, 3 dimples): plate cal, saved as the machine default for every job (redo only if the cover moves). Then tip on paper on the board top (board top, per job) |
 | Check | Stats under the tabs say SAFE TO RUN or list the problems. **3D preview** shows the board, tall parts and the path |
 
 Keys on the map (click it first): arrows jog X/Y, PgUp/PgDn jog Z, at the chosen step.

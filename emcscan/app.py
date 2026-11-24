@@ -297,6 +297,7 @@ class App(tk.Tk):
     def open_job(self, path: Path):
         try:
             cfg = cfgmod.load(path)
+            cfg = self._sync_plate_cal(path, cfg)
         except Exception as e:                                  # noqa: BLE001
             messagebox.showerror("Open job", f"Cannot read {path}:\n{e}")
             return
@@ -548,10 +549,10 @@ class App(tk.Tk):
         add(OK if srcs else INFO, "Height source",
             "; ".join(srcs) if srcs else f"flat rule: tallest part {cfg['board']['tallest_part']} mm")
         cal = cfg["calibration"]
-        t = cfgmod.load(TEMPLATE)["calibration"] if TEMPLATE.exists() else {}
-        same = cal.get("origin_x") == t.get("origin_x") and cal.get("origin_y") == t.get("origin_y")
-        add(BAD if same else OK, "Plate origin", "template value: set it (Setup > Machine)" if same
-            else f"marker 0 at ({cal['origin_x']}, {cal['origin_y']}), angle {cal.get('angle_deg', 0)} deg")
+        done = "plate_cal_date" in cal
+        add(OK if done else BAD, "Plate cal", "never set: Setup > Machine (markers 3 then 2)" if not done
+            else f"marker 0 at ({cal['origin_x']}, {cal['origin_y']}), angle {cal.get('angle_deg', 0)} deg, "
+                 f"set {cal['plate_cal_date']}")
         if not cfg["printer"].get("has_nozzle", True):
             add(OK if "z_board_top" in cal else BAD, "Board top Z",
                 f"{cal['z_board_top']}" if "z_board_top" in cal else "not set: Setup > Machine > Set board top")
@@ -1032,14 +1033,29 @@ class App(tk.Tk):
             return
         self._set_plate_point(k, x, y)
 
-    def _reg_from_probe(self, k):
-        pos = self.machine.pos
-        if pos is None or not self.machine.homed:
-            messagebox.showinfo("Place STEP", "Connect and home the printer, then jog the probe "
-                                              "tip onto the board point.")
+    def _fresh_pos(self, then, what: str, hint: str):
+        """Ask the printer where the head REALLY is (M114), then call then(pos) on the UI
+        thread. Every button that stores "where the probe is now" goes through this: the
+        remembered position is stale if the head was moved any other way (2026-11-22: the
+        plate origin and board top were saved as the home position, X-5 Y0 Z0)."""
+        if self.machine.printer is None or not self.machine.homed:
+            messagebox.showinfo(what, hint)
             return
-        x, y = geometry.nozzle_to_plate_xy(self.cfg, pos[0], pos[1])
-        self._set_plate_point(k, x, y)
+
+        def after(pos):
+            if pos is None:
+                messagebox.showerror(what, "The printer did not report its position.")
+                return
+            self._update_pos()
+            then(pos)
+        self.mach(lambda p: p.where(strict=True), what, after=after)
+
+    def _reg_from_probe(self, k):
+        def use(pos):
+            x, y = geometry.nozzle_to_plate_xy(self.cfg, pos[0], pos[1])
+            self._set_plate_point(k, x, y)
+        self._fresh_pos(use, "Place STEP", "Connect and home the printer, then jog the probe "
+                                          "tip onto the board point.")
 
     def _reg_rot(self):
         reg = self._reg()
@@ -1138,12 +1154,17 @@ class App(tk.Tk):
                         variable=self.v_guard).pack(anchor="w", pady=2)
         cf = ttk.LabelFrame(f, text="Calibrate (probe tip on the spot, then press)", padding=4)
         cf.pack(fill="x", pady=4)
-        self.v_marker = tk.StringVar(value="0")
+        self.v_marker = tk.StringVar(value="3")
         r = ttk.Frame(cf); r.pack(fill="x")
         ttk.Button(r, text="Go to marker", command=self.goto_marker).pack(side="left")
         ttk.Combobox(r, textvariable=self.v_marker, values=["0", "1", "2", "3"], width=3, state="readonly").pack(side="left", padx=4)
-        ttk.Button(cf, text="Tip over marker 0 center: set plate origin", command=self.cal_origin).pack(fill="x", pady=1)
-        ttk.Button(cf, text="Tip over marker 1 center: set plate angle", command=self.cal_angle).pack(fill="x", pady=1)
+        self._cal_first = None
+        ttk.Button(cf, text="1. Tip over marker 3 center (back-left, 4 dimples)",
+                   command=self.cal_first).pack(fill="x", pady=1)
+        ttk.Button(cf, text="2. Tip over marker 2 center (back-right, 3 dimples): save plate",
+                   command=self.cal_second).pack(fill="x", pady=1)
+        ttk.Label(cf, text="Plate cal is saved as the machine default; every job uses it. "
+                           "Redo only if the cover moves.", foreground=theme.DIM).pack(anchor="w")
         ttk.Button(cf, text="Tip touching paper on the BOARD top: set board top", command=self.cal_board_top).pack(fill="x", pady=1)
         ttk.Button(cf, text="Nozzle on paper on the PLATE (A1 mini): set plate top", command=self.cal_plate_top).pack(fill="x", pady=1)
         tf = ttk.LabelFrame(f, text="Teach a tall part (tip just above its top, a paper's gap)", padding=4)
@@ -1211,29 +1232,34 @@ class App(tk.Tk):
             return
         s = self._step()
         dx, dy, dz = ux * s, uy * s, uz * s
-        pos = self.machine.pos
-        if pos is None:
+        if self.machine.pos is None:
             messagebox.showinfo("Jog", "Position unknown: connect and home first.")
             return
-        cfg = self.cfg
-        nz = pos[2] + dz
-        if nz < float(cfg["printer"].get("z_min", -999)) - 1e-6:
-            self.say(f"[jog] refused: Z {nz:.2f} is below the firmware limit z_min")
-            return
-        if "z_board_top" in cfg["calibration"] or cfg["printer"].get("has_nozzle", True):
-            h = self._tip_h((pos[0], pos[1], nz))
-            if h is not None and h < -0.3 and dz < 0:
-                self.say(f"[jog] refused: the tip would be {h:.2f} mm into the board")
+        cfg, heights, homed = self.cfg, self.heights, self.machine.homed
+        guard = bool(self.v_guard.get())
+
+        def work(p):
+            # All checks on the position the printer reports NOW, not the remembered one.
+            pos = p.where(strict=True)
+            nz = pos[2] + dz
+            if nz < float(cfg["printer"].get("z_min", -999)) - 1e-6:
+                self.say(f"[jog] refused: Z {nz:.2f} is below the firmware limit z_min")
                 return
-        if (dx or dy) and self.v_guard.get() and self.heights is not None and self.machine.homed:
-            px, py = geometry.nozzle_to_plate_xy(cfg, pos[0] + dx, pos[1] + dy)
-            need = float(self.heights.req_at(px, py)) - float(cfg["scan"]["clearance"])
-            h = self._tip_h(pos)
-            if h is not None and h < need:
-                self.say(f"[jog] refused: the probe ring would touch a part there (tip {h:.1f} mm, needs "
-                         f"{need:.1f}). Lift first, or untick the guard to teach.")
-                return
-        self.mach(lambda p: p.jog(dx, dy, dz), "jog", need_home=False)
+            if "z_board_top" in cfg["calibration"] or cfg["printer"].get("has_nozzle", True):
+                h = self._tip_h((pos[0], pos[1], nz))
+                if h is not None and h < -0.3 and dz < 0:
+                    self.say(f"[jog] refused: the tip would be {h:.2f} mm into the board")
+                    return
+            if (dx or dy) and guard and heights is not None and homed:
+                px, py = geometry.nozzle_to_plate_xy(cfg, pos[0] + dx, pos[1] + dy)
+                need = float(heights.req_at(px, py)) - float(cfg["scan"]["clearance"])
+                h = self._tip_h(pos)
+                if h is not None and h < need:
+                    self.say(f"[jog] refused: the probe ring would touch a part there (tip {h:.1f} mm, "
+                             f"needs {need:.1f}). Lift first, or untick the guard to teach.")
+                    return
+            p.jog(dx, dy, dz)
+        self.mach(work, "jog", need_home=False)
 
     def _on_key(self, ev):
         if self.nb.select() != str(self.tab_setup) or self.cfg is None:
@@ -1262,58 +1288,105 @@ class App(tk.Tk):
         z = min(z, safe)
         self.mach(lambda p: p.move_to(x, y, z, via_z=safe), f"go to marker {i}")
 
-    def cal_origin(self):
-        pos = self.machine.pos
-        if pos is None or not self.machine.homed:
-            return messagebox.showinfo("Calibrate", "Connect, home and jog the tip over marker 0 first.")
-        self.set_cfg("calibration", "origin_x", round(pos[0], 2), recompute=False)
-        self.set_cfg("calibration", "origin_y", round(pos[1], 2))
-        self.say(f"[cal] plate origin = ({pos[0]:.2f}, {pos[1]:.2f})")
+    # Every calibration button reads the position fresh from the printer and shows it
+    # before saving (2026-11-22: stale home position X-5 Y0 Z0 was saved as origin and
+    # board top, and the next move snapped the mock H20).
+    def _confirm_pos(self, what: str, pos, detail: str) -> bool:
+        return messagebox.askokcancel(what, f"The printer reports X {pos[0]:.2f}  Y {pos[1]:.2f}  "
+                                            f"Z {pos[2]:.2f}.\n\n{detail}\n\nSave it?")
 
-    def cal_angle(self):
-        pos = self.machine.pos
-        if pos is None or not self.machine.homed:
-            return messagebox.showinfo("Calibrate", "Jog the tip over marker 1 first.")
-        cal = self.cfg["calibration"]
-        vx, vy = pos[0] - cal["origin_x"], pos[1] - cal["origin_y"]
-        px, py = geometry.marker_centers_plate(self.cfg)[1]
-        ang = round(math.degrees(math.atan2(vy, vx) - math.atan2(py, px)), 3)
-        err = math.hypot(vx, vy) - math.hypot(px, py)
-        self.set_cfg("calibration", "angle_deg", ang)
-        self.say(f"[cal] plate angle = {ang} deg (length error {err:+.2f} mm; over 1 mm means a "
-                 "marker or the alignment is off)")
+    # Plate cal: the tip visits the back pair (markers 3 then 2; the front ones are out of
+    # the probe's reach on the A5) and marker 0 is worked out from the plate layout.
+    # The result is written to the job AND the machine template, so it is the default
+    # for every job (2026-11-23: the cover stays put; recal only if it moves).
+    def cal_first(self):
+        i, _ = geometry.cal_pair(self.cfg)
+
+        def use(pos):
+            if not self._confirm_pos(f"Plate cal, point 1 of 2", pos,
+                                     f"This is where the tip is over the center of marker {i}."):
+                return
+            self._cal_first = (i, (pos[0], pos[1]))
+            self.say(f"[cal] marker {i} at ({pos[0]:.2f}, {pos[1]:.2f}); now jog to the second marker")
+        self._fresh_pos(use, "Calibrate", f"Connect, home and jog the tip over marker {i} first.")
+
+    def cal_second(self):
+        i, j = geometry.cal_pair(self.cfg)
+        if self._cal_first is None or self._cal_first[0] != i:
+            return messagebox.showinfo("Calibrate", f"Do step 1 first (tip over marker {i}).")
+
+        def use(pos):
+            ox, oy, ang, err = geometry.plate_cal_from_pair(self.cfg, i, self._cal_first[1], j, pos)
+            warn = "" if abs(err) <= 1.0 else "\n\nOVER 1 mm: a marker or a jog is off. Cancel and redo."
+            if not self._confirm_pos("Plate cal, point 2 of 2", pos,
+                                     f"Tip over marker {j}: angle {ang} deg, length error "
+                                     f"{err:+.2f} mm, marker 0 at ({ox}, {oy}).{warn}"):
+                return
+            self._save_plate_cal({"origin_x": ox, "origin_y": oy, "angle_deg": ang})
+            self._cal_first = None
+            self.say(f"[cal] plate: marker 0 at ({ox}, {oy}), angle {ang} deg, "
+                     f"length error {err:+.2f} mm; saved to the job and the machine template")
+        self._fresh_pos(use, "Calibrate", f"Jog the tip over marker {j} first.")
+
+    def _save_plate_cal(self, vals: dict):
+        vals = dict(vals, plate_cal_date=time.strftime("%Y-%m-%d %H:%M"))
+        for f in {self.cfg_path, TEMPLATE}:
+            if f is not None and Path(f).exists():
+                for k, v in vals.items():
+                    cfgmod.set_value(f, "calibration", k, v)
+        self.reload_cfg()
+        self.recompute()
+
+    def _sync_plate_cal(self, path: Path, cfg):
+        """Give an opened job the machine plate cal (template) if it differs. Returns the
+        reloaded cfg."""
+        if not TEMPLATE.exists() or Path(path).resolve() == TEMPLATE.resolve():
+            return cfg
+        t = cfgmod.load(TEMPLATE)["calibration"]
+        if "plate_cal_date" not in t:
+            return cfg
+        keys = geometry.PLATE_CAL_KEYS + ("plate_cal_date",)
+        if all(cfg["calibration"].get(k) == t[k] for k in keys):
+            return cfg
+        for k in keys:
+            cfgmod.set_value(path, "calibration", k, t[k])
+        self.say(f"[cal] job updated to the machine plate cal of {t['plate_cal_date']}")
+        return cfgmod.load(path)
 
     def cal_board_top(self):
-        pos = self.machine.pos
-        if pos is None or not self.machine.homed:
-            return messagebox.showinfo("Calibrate", "Jog the tip down onto a paper strip on the board top first.")
-        z = round(pos[2] + float(self.cfg["probe"]["offset_z"]), 2)
-        self.set_cfg("calibration", "z_board_top", z)
-        self.say(f"[cal] board top Z = {z}")
+        def use(pos):
+            z = round(pos[2] + float(self.cfg["probe"]["offset_z"]), 2)
+            if not self._confirm_pos("Board top", pos, f"The tip is touching a paper strip on "
+                                     f"the board top: board top Z = {z}."):
+                return
+            self.set_cfg("calibration", "z_board_top", z)
+            self.say(f"[cal] board top Z = {z}")
+        self._fresh_pos(use, "Calibrate", "Jog the tip down onto a paper strip on the board top first.")
 
     def cal_plate_top(self):
-        pos = self.machine.pos
-        if pos is None or not self.machine.homed:
-            return
-        self.set_cfg("calibration", "z_plate_top", round(pos[2], 2))
-        self.say(f"[cal] plate top Z = {pos[2]:.2f}")
+        def use(pos):
+            if not self._confirm_pos("Plate top", pos, "The nozzle is touching paper on the plate."):
+                return
+            self.set_cfg("calibration", "z_plate_top", round(pos[2], 2))
+            self.say(f"[cal] plate top Z = {pos[2]:.2f}")
+        self._fresh_pos(use, "Calibrate", "Connect and home first.")
 
     def mark_here(self):
-        pos = self.machine.pos
-        if pos is None or not self.machine.homed:
-            return messagebox.showinfo("Teach", "Connect, home, and jog the tip just above the part top.")
         if "z_board_top" not in self.cfg["calibration"] and not self.cfg["printer"].get("has_nozzle", True):
             return messagebox.showinfo("Teach", "Set the board top first (Calibrate).")
-        try:
-            r = float(self.v_mark_r.get())
-        except ValueError:
-            r = 3.0
-        x, y = geometry.nozzle_to_plate_xy(self.cfg, pos[0], pos[1])
-        h = round(self._tip_h(pos), 2)
-        self.setup.setdefault("marks", []).append({"x": round(x, 2), "y": round(y, 2), "h": h, "r": r,
-                                                   "note": self.v_mark_note.get().strip()})
-        self.say(f"[teach] mark ({x:.1f}, {y:.1f}) h {h} r {r}")
-        self.save_setup()
+
+        def use(pos):
+            try:
+                r = float(self.v_mark_r.get())
+            except ValueError:
+                r = 3.0
+            x, y = geometry.nozzle_to_plate_xy(self.cfg, pos[0], pos[1])
+            h = round(self._tip_h(pos), 2)
+            self.setup.setdefault("marks", []).append({"x": round(x, 2), "y": round(y, 2), "h": h,
+                                                       "r": r, "note": self.v_mark_note.get().strip()})
+            self.say(f"[teach] mark ({x:.1f}, {y:.1f}) h {h} r {r}")
+            self.save_setup()
+        self._fresh_pos(use, "Teach", "Connect, home, and jog the tip just above the part top.")
 
     # Scan area panel
     def _build_area_panel(self, f):
@@ -1488,14 +1561,9 @@ class App(tk.Tk):
         need = float(self.heights.req_at(x, y)) if self.heights is not None else geometry.min_height(cfg)
         h = max(h0, need + 0.05)
         nx, ny, nz = geometry.plate_to_nozzle(cfg, x, y, h)
-        pos = self.machine.pos
-        cx, cy = geometry.nozzle_to_plate_xy(cfg, pos[0], pos[1])
-        if self.heights is not None and self._in_map(cx, cy) and self._in_map(x, y):
-            via = geometry.plate_to_nozzle(cfg, x, y, self.heights.via(cx, cy, x, y) + 0.05)[2]
-        else:
-            # The height map only covers the scan area plus the probe's reach. Outside it the
-            # map just repeats its edge, so it knows nothing there: cross at safe_z.
-            via = float(cfg["printer"]["safe_z"])
+        # Manual moves always cross at safe_z: they are rare, so speed does not matter, and
+        # it does not depend on knowing the start point or on the map covering the route.
+        via = float(cfg["printer"]["safe_z"])
         warn = ("\n\nWARNING: this spot is outside the height map (scan area plus probe reach), "
                 "so the parts there are unknown. Make sure nothing taller than "
                 f"{h:.1f} mm is under it." if self.heights is not None and not self._in_map(x, y) else "")

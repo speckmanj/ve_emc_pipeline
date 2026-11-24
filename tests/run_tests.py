@@ -6,6 +6,7 @@ interrupted and resumed, the report, and the before/after comparison.
 """
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import sys
@@ -79,6 +80,24 @@ def geometry_round_trip():
     nx, ny, _ = geometry.plate_to_nozzle(c, 30.0, 20.0, 7.0)
     x, y = geometry.nozzle_to_plate_xy(c, nx, ny)
     assert abs(x - 30) < 1e-9 and abs(y - 20) < 1e-9
+
+
+@test
+def plate_cal_from_back_pair():
+    # A5 cover: tip only reaches the back markers; marker 0 must come out right anyway.
+    c = config.load(ROOT / "configs" / "a5_tinysa.toml")
+    truth = dict(origin_x=12.3, origin_y=-4.5, angle_deg=1.7)
+    c["calibration"].update(truth)
+    i, j = geometry.cal_pair(c)
+    assert (i, j) == (3, 2)
+    m = geometry.marker_centers_plate(c)
+    p_i = geometry.plate_to_nozzle(c, *m[i], 0)[:2]
+    p_j = geometry.plate_to_nozzle(c, *m[j], 0)[:2]
+    ox, oy, ang, err = geometry.plate_cal_from_pair(c, i, p_i, j, p_j)
+    assert abs(ox - 12.3) < 0.01 and abs(oy + 4.5) < 0.01 and abs(ang - 1.7) < 0.001 and abs(err) < 1e-6
+    # a 1.5 mm jog miss on marker 2 along the edge shows up as length error
+    _, _, _, err = geometry.plate_cal_from_pair(c, i, p_i, j, (p_j[0] + 1.5, p_j[1]))
+    assert 1.4 < err < 1.6
 
 
 @test
@@ -201,6 +220,52 @@ def tinysa_parser():
     cfg = config.load(ROOT / "configs" / "a5_tinysa.toml")
     for b in cfg["analyzer"]["bands"]:                   # no shipped band straddles 800 MHz
         assert not (b["start_hz"] < TinySA.ULTRA_START_HZ < b["stop_hz"]), b["name"]
+
+
+@test
+def scan_analyzer_auto_recovery():
+    # 2026-11-23: the TinySA stalled every ~160 points; the scan must ride through it.
+    from emcscan import analyzers, scan as scanmod
+    from emcscan.runstore import Run
+    c = sim_cfg("recover", x_min=10.0, x_max=25.0, y_min=20.0, y_max=35.0, step=3.0, heights=[7.0])
+    n_total = len(planmod.build_plan(c))
+    orig_sweep, orig_rc, orig_waits = (analyzers.SimAnalyzer.sweep, analyzers.Analyzer.reconnect,
+                                       scanmod.RECONNECT_WAITS_S)
+    count = {"n": 0, "rc": 0}
+
+    def stalls(self, band, probe_xyz=None):
+        count["n"] += 1
+        if count["n"] > 60 and count["n"] % 40 == 0:        # after the pre-scan, every 40 sweeps
+            raise TimeoutError("TinySA did not answer in 60 s")
+        return orig_sweep(self, band, probe_xyz)
+
+    def rc(self):
+        count["rc"] += 1
+        return orig_rc(self)
+
+    analyzers.SimAnalyzer.sweep, analyzers.Analyzer.reconnect = stalls, rc
+    scanmod.RECONNECT_WAITS_S = (0.0,)
+    try:
+        run_dir = scanmod.run_scan(c, log=lambda *_: None)
+        meta = json.loads((run_dir / "meta.json").read_text())
+        assert meta["state"] == "finished" and len(Run(run_dir).done_idx) == n_total
+        assert len(meta["recoveries"]) == count["rc"] >= 2 and all(e["ok"] for e in meta["recoveries"])
+
+        def dead(self, band, probe_xyz=None):               # never answers: must give up, not loop
+            raise TimeoutError("TinySA did not answer in 60 s")
+        analyzers.SimAnalyzer.sweep = dead
+        count["rc"] = 0
+        c["analyzer"]["lna_threshold_dbm"] = -999.0
+        c["job"]["name"] = "recover_dead"
+        try:
+            scanmod.run_scan(c, resume=None, log=lambda *_: None)
+            raise AssertionError("expected a give-up")
+        except RuntimeError as e:
+            assert "recovery limit" in str(e), e
+        assert count["rc"] == 3, count                     # point_retries = 3, then stop
+    finally:
+        analyzers.SimAnalyzer.sweep, analyzers.Analyzer.reconnect = orig_sweep, orig_rc
+        scanmod.RECONNECT_WAITS_S = orig_waits
 
 
 @test

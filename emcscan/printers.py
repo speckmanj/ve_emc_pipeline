@@ -27,6 +27,10 @@ import urllib.request
 from .plan import move_time
 
 
+class ScreenActivity(RuntimeError):
+    """The printer's own touchscreen was used while we were connected (shared serial line)."""
+
+
 class Printer:
     # True when send(wait=True) itself returns only after the motion is done (serial with
     # M400, Moonraker, the simulator). False (Bambu): we have to sleep the estimated time.
@@ -64,6 +68,13 @@ class Printer:
         if via_z is not None:
             travel = max(travel, round(float(via_z), 3))
         if cur is None:
+            # Where Z really is is unknown: never cross lower than safe_z, or the first
+            # "G1 Z" could be a move DOWN into the board followed by a sideways drag.
+            travel = max(travel, float(self.pc["safe_z"]))
+        # Absolute mode on every move: a G91 left behind (an error between G91 and G90)
+        # would turn every coordinate below into a relative jump.
+        self.send("G90")
+        if cur is None:
             self._line(f"G1 Z{travel} F{fz:.0f}", None, None, fz)
             self._line(f"G1 X{x} Y{y} F{fxy:.0f}", None, None, fxy)
         else:
@@ -76,15 +87,32 @@ class Printer:
         time.sleep(self.pc["settle_s"])
 
     def jog(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0):
-        """Relative move from the last commanded position (Z first when going up)."""
-        if self.pos is None:
+        """Relative move from where the head REALLY is (asked fresh where the printer can
+        report it), Z first when going up. A jog from a stale position is an absolute move
+        to somewhere else."""
+        cur = self.where(strict=True)
+        if cur is None:
             raise RuntimeError("position unknown: home or go to a known point first")
-        x, y, z = self.pos
+        x, y, z = cur
         self.move_to(x + dx, y + dy, z + dz)
 
-    def where(self):
-        """Position as the printer reports it, or the last commanded one."""
+    def where(self, strict: bool = False):
+        """Position as the printer reports it, or the last commanded one (printers that
+        cannot report it)."""
         return self.pos
+
+    def quiet(self):
+        """Switch every stepper driver off for a sweep (M84), then wait quiet_settle_s.
+        2026-11-24 gantry noise test (tests/gantry_noise): the A5's four drivers holding
+        still add up to +28 dB at 30-40 MHz and +4 to +10 dB up to 300 MHz; any single one
+        off barely helps, all off brings it within about 2 dB of the A5 switched off at
+        the wall. The next move switches them back on (wake, or any G1)."""
+        self.send("M84", wait=True)
+        time.sleep(float(self.pc.get("quiet_settle_s", 0.1)))
+
+    def wake(self):
+        """Drivers back on (M17) before the next move."""
+        self.send("M17", wait=True)
 
     def lift(self):
         """Raise to safe_z (used at the end and on Ctrl+C). Z only: the command carries no
@@ -158,9 +186,17 @@ class SerialGcodePrinter(Printer):
     POS_TOL = 0.05                              # mm; M114 prints 2 decimals
 
     def move_to(self, x, y, z, via_z=None):
-        """Move, then ask the printer where it really is. Marlin clamps a move past its soft
-        limits WITHOUT an error, so the remembered position (and every reading logged at it)
-        would silently be wrong. Refuse to carry on instead."""
+        """Ask the printer where it really is, move (Z up first, from the REAL height), then
+        check where it ended up.
+
+        Before (2026-11-22, snapped the mock H20): the climb was decided from the position
+        the app remembered. After the head was moved some other way (the printer's own
+        screen, or anything the app did not see), "Z up to the travel height" was computed
+        from a stale Z, could be no move at all or a move DOWN, and the X/Y move then dragged
+        the probe sideways through the board. Now every move starts from M114.
+        After the move: Marlin clamps a move past its soft limits WITHOUT an error, so the
+        position (and every reading logged at it) would silently be wrong. Refuse instead."""
+        self.pos = self.where(strict=True)
         super().move_to(x, y, z, via_z)
         want = self.pos
         got = self.where()
@@ -190,14 +226,34 @@ class SerialGcodePrinter(Printer):
                 f"(got {reply[:40]!r}). Check [printer] baud (JG Aurora A5 = 250000) and port "
                 f"(Device Manager > Ports, CH340), and close any other program using the port.")
         name = re.search(rb"MACHINE_TYPE:([^\r\n]*?)(?: EXTRUDER| UUID|\r|\n|$)", reply)
-        self.ser.reset_input_buffer()
+        time.sleep(0.5)                         # let any late boot text arrive, then drop it,
+        self.ser.reset_input_buffer()           # so the touchscreen guard starts from silence
         print(f"[printer] serial G-code on {self.pc['port']}"
               + (f": {name.group(1).decode(errors='replace').strip()}" if name else ""))
+
+    def _check_quiet_line(self):
+        """2026-11-24 (serial_sniff test): the A5 touchscreen shares the USB serial line.
+        Its commands and Marlin's replies to them arrive on our port, so after any screen
+        use our 'ok's and M114 reads belong to someone else. Between our commands the line
+        must be silent; anything waiting there (other than a busy keepalive) means the
+        screen was used, and nothing more is sent."""
+        if not self.ser.in_waiting:
+            return
+        junk = self.ser.read(self.ser.in_waiting).decode(errors="replace")
+        lines = [ln.strip() for ln in junk.splitlines() if ln.strip()]
+        lines = [ln for ln in lines if not ln.startswith("echo:busy")
+                 and "SD init" not in ln and "SD card" not in ln]     # late boot text
+        if lines:
+            raise ScreenActivity(
+                "the printer's touchscreen was used while connected (it shares the USB line, "
+                f"so replies are no longer ours; saw {lines[:3]!r}). Nothing more was sent. "
+                "Leave the screen alone, reconnect, and HOME again before moving.")
 
     def send(self, gcode, wait=False):
         lines = [g for g in gcode.splitlines() if g.strip()]
         if wait:
             lines.append("M400")                # returns 'ok' only when motion is done
+        self._check_quiet_line()
         for line in lines:
             self.ser.write((line + "\n").encode())
             deadline = time.time() + 120
@@ -210,25 +266,48 @@ class SerialGcodePrinter(Printer):
             else:
                 raise TimeoutError(f"no 'ok' for '{line}'")
 
+    def prepare(self):
+        """Also keep the motors powered while the app is connected (M84 S0 = no idle
+        timeout). Marlin switches them off after about 2 minutes idle; the head can then be
+        pushed or the Z screw turned by hand, and neither Marlin nor the app would know:
+        M114 keeps reporting the old position, and every move after is planned from it."""
+        super().prepare()
+        self.send("M84 S0", wait=True)
+
+    def park(self):
+        super().park()
+        self.send("M84 S120", wait=True)        # hand the printer back with Marlin's usual idle timeout
+
     def home(self):
+        # Marlin homes X and Y at whatever height Z is at. Go 10 mm up first (relative: the
+        # height may not be known yet), so homing never drags the probe across the board.
+        self.send(f"G91\nG1 Z10 F{self.pc['feed_z']:.0f}\nG90", wait=True)
         self.send("G28", wait=True)
         self.pos = self.where()
 
-    def where(self):
-        """M114 after M400: 'X:10.00 Y:20.00 Z:5.00 E:0.00 Count ...'."""
-        import re
+    def lift(self):
+        """Lift from the REAL height (M114 first), so it only ever goes up."""
+        self.pos = self.where(strict=True)
+        super().lift()
+
+    def where(self, strict: bool = False):
+        """M114 after M400: 'X:10.00 Y:20.00 Z:5.00 E:0.00 Count ...'.
+        strict: raise if the printer does not report a position (never fall back to the
+        remembered one; a move must not start from a guess)."""
         self.send("M400")
         self.ser.write(b"M114\n")
         pos, deadline = None, time.time() + 5
         while time.time() < deadline:
             resp = self.ser.readline().decode(errors="replace").strip()
-            m = re.match(r"X:\s*(-?[\d.]+)\s+Y:\s*(-?[\d.]+)\s+Z:\s*(-?[\d.]+)", resp)
-            if m:
+            m = re.search(r"X:\s*(-?[\d.]+)\s+Y:\s*(-?[\d.]+)\s+Z:\s*(-?[\d.]+)", resp)
+            if m and pos is None:               # first X: Y: Z: on the line, not "Count X:"
                 pos = tuple(float(v) for v in m.groups())
             if resp.startswith("ok"):
                 break
         if pos is not None:
             self.pos = pos
+        elif strict:
+            raise RuntimeError("the printer did not report its position (M114): not moving")
         return self.pos
 
     def close(self):

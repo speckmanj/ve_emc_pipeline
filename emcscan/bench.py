@@ -1,14 +1,18 @@
 """Bench helpers: test the devices, home, calibrate the plate position, park the probe.
 
 Calibration answers three questions, saved into the job's [calibration] section:
-    origin_x, origin_y   where is marker 0, in nozzle coordinates?   (command: origin)
-    angle_deg            is the plate turned on the bed?             (command: angle, at marker 1)
+    origin_x, origin_y   where is marker 0, in nozzle coordinates?   (commands: first, second)
+    angle_deg            is the plate turned on the bed?
+The tip visits the back pair (markers 3 then 2; the front ones are out of the probe's
+reach on the A5) and marker 0 is worked out from the plate layout. `save` writes the plate
+cal to the job and to the machine template, so every new job starts with it.
     z_plate_top          at what nozzle Z does the nozzle touch the plate top? (command: ztop)
 """
 from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -75,8 +79,9 @@ def goto(cfg, x, y, h):
 HELP = """Commands (distances in mm, relative jogs):
   x 1.5 | y -2 | z -0.5   jog the nozzle
   m 0..3                  go to marker n (safe height, then down to align height)
-  origin                  probe tip is over marker 0 center: save origin
-  angle                   probe tip is over marker 1 center: save plate rotation
+  first                   probe tip is over marker 3 center (back-left, 4 dimples)
+  second                  probe tip is over marker 2 center (back-right, 3 dimples):
+                          works out marker 0 and the plate rotation
   ztop                    nozzle just touches a paper strip on the plate top: save Z
   show                    print the current calibration
   save                    write calibration into the job file
@@ -106,7 +111,9 @@ def calibrate(cfg):
         return (cal["origin_x"] + math.cos(a) * px - math.sin(a) * py,
                 cal["origin_y"] + math.sin(a) * px + math.cos(a) * py)
 
-    x, y = marker_xy(0)
+    pair = geometry.cal_pair(cfg)
+    first = None
+    x, y = marker_xy(pair[0])
     pr.move_to(x, y, safe)
     z = align_z()
     pr.move_to(x, y, z)
@@ -117,6 +124,9 @@ def calibrate(cfg):
             if not cmd:
                 continue
             c = cmd[0].lower()
+            cur = pr.where()                    # jog from where the head REALLY is
+            if cur is not None:
+                x, y, z = cur
             try:
                 if c in ("x", "y", "z") and len(cmd) == 2:
                     d = float(cmd[1])
@@ -134,15 +144,16 @@ def calibrate(cfg):
                     pr.move_to(x, y, safe)
                     z = align_z()
                     pr.move_to(x, y, z)
-                elif c == "origin":
-                    cal["origin_x"], cal["origin_y"] = round(x, 2), round(y, 2)
-                    print(f"origin = ({x:.2f}, {y:.2f})")
-                elif c == "angle":
-                    vx, vy = x - cal["origin_x"], y - cal["origin_y"]
-                    px, py = centers[1]
-                    cal["angle_deg"] = round(math.degrees(math.atan2(vy, vx) - math.atan2(py, px)), 3)
-                    err = math.hypot(vx, vy) - math.hypot(px, py)
-                    print(f"angle = {cal['angle_deg']} deg (length error {err:+.2f} mm; "
+                elif c == "first":
+                    first = (x, y)
+                    print(f"marker {pair[0]} at ({x:.2f}, {y:.2f}); now `m {pair[1]}`, jog, `second`")
+                elif c == "second":
+                    if first is None:
+                        print(f"do `first` over marker {pair[0]} before this")
+                        continue
+                    ox, oy, ang, err = geometry.plate_cal_from_pair(cfg, pair[0], first, pair[1], (x, y))
+                    cal.update(origin_x=ox, origin_y=oy, angle_deg=ang)
+                    print(f"marker 0 at ({ox}, {oy}), angle = {ang} deg (length error {err:+.2f} mm; "
                           "more than 1 mm means a marker or the alignment is off)")
                 elif c == "ztop":
                     cal["z_plate_top"] = round(z, 2)
@@ -152,7 +163,14 @@ def calibrate(cfg):
                 elif c == "save":
                     for k in ("origin_x", "origin_y", "angle_deg", "z_plate_top"):
                         cfgmod.set_value(cfg["_path"], "calibration", k, float(cal[k]))
-                    print(f"saved to {cfg['_path']}")
+                    stamp = time.strftime("%Y-%m-%d %H:%M")
+                    cfgmod.set_value(cfg["_path"], "calibration", "plate_cal_date", stamp)
+                    tpl = Path(__file__).resolve().parents[1] / "configs" / "a5_tinysa.toml"
+                    if tpl.exists() and tpl.resolve() != Path(cfg["_path"]).resolve():
+                        for k in geometry.PLATE_CAL_KEYS:
+                            cfgmod.set_value(tpl, "calibration", k, float(cal[k]))
+                        cfgmod.set_value(tpl, "calibration", "plate_cal_date", stamp)
+                    print(f"saved to {cfg['_path']} (plate cal also to the machine template)")
                 elif c in ("q", "quit", "exit"):
                     break
                 else:

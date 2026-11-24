@@ -43,9 +43,10 @@ accel = 500.0
 settle_s = 0.15
 
 [calibration]                   # set in the app (Setup tab > Machine)
-origin_x = 150.0
-origin_y = 150.0
-angle_deg = 0.0
+plate_cal_date = "2026-11-23 10:37"
+origin_x = 9.8
+origin_y = -21.0
+angle_deg = 0.063
 # z_board_top is set with the probe tip touching a paper strip on the board top
 
 [scan]                          # plate frame: origin = center of marker 0 (front-left)

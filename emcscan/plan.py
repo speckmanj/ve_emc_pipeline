@@ -165,6 +165,12 @@ def check_plan(cfg, plan: list[ScanPoint]) -> list[str]:
         if not pr.get("has_nozzle", True) and "z_board_top" not in cal:
             errs.append("board top Z is not calibrated (Setup > Machine > Set board top): probe "
                         "heights would be a guess from the nominal plate thickness")
+        zb = cal.get("z_board_top")
+        if zb is not None and float(zb) <= float(pr.get("z_min", -999)) + 1.0:
+            # 2026-11-22: saved as 0.0 from a stale home position; the board sits on a 50 mm
+            # cover, it cannot be at the bottom of Z travel.
+            errs.append(f"board top Z ({float(zb):g}) is at the bottom of Z travel (z_min "
+                        f"{pr.get('z_min')}): almost certainly a stale position. Set it again")
     return errs
 
 

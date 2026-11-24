@@ -60,6 +60,8 @@ DEFAULTS: dict = {
         "feed_z": 600.0,            # mm/min
         "accel": 500.0,             # mm/s^2, kept low so the moving bed does not jolt the board
         "settle_s": 0.15,           # wait after each move before measuring
+        "quiet_sweep": False,       # drivers off (M84) during each sweep: removes up to 28 dB of gantry noise (2026-11-24)
+        "quiet_settle_s": 0.1,      # wait after M84 before sweeping
     },
     "calibration": {                # written by `emcscan calibrate`
         "origin_x": 150.0,          # nozzle X when the PROBE TIP is over marker 0
