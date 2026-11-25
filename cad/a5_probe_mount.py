@@ -3,6 +3,15 @@
     .venv\\Scripts\\python cad\\a5_probe_mount.py
     .venv\\Scripts\\python cad\\a5_probe_mount.py --flange-t 3.2 --handle-d 14     (adds a lip over the flange)
 
+v6 (2026-11-24): the probe hangs 20 mm lower (--tip-z -20). On the HIFIS main board the head
+and the v5 mount (underside 20.5 mm above the tip) hit the tall bulk capacitors with the tip on
+the board (Jacob's photos). The lower guide now never sits below the side leg's bottom edge
+(--guide-floor, default on), so the whole mount stays as high as the head and the lowest
+point of mount + head is 40.5 mm above the tip (was 20.5). The blade span between the guide
+and the seat gets shorter (44 mm instead of 57), still two keyed supports. Pair it with the
+80 mm Z spacer (a5_z_spacer.py, default --ext 80): the tip drops 20 mm, so Z must home
+20 mm higher or G28 Z drives the tip into the bed cover.
+
 v5 (2026-11-18): mirrored in X (v4 was the wrong hand; --no-mirror restores it), and the
 snap caps are now locked in Z. In v4 the barbs and body recesses ran the full block
 height, so a cap could slide up or down off the body. Now each barb is shorter than its
@@ -124,6 +133,8 @@ def build(a):
     ay = yfo + max(sr - 1, a.tip_w / 2 + a.tip_gap, ARM_L + BARB_L + 3)
     z_m2 = SCREW_Z[0] - a.below                               # bottom edge of the side leg
     gz = a.tip_z + a.tip_h + a.tip_gap                        # lower guide bottom, above the ring
+    if a.guide_floor:                                         # v6: never below the side leg
+        gz = max(gz, z_m2)
     fz = a.tip_z + a.blade_len                                # seat top = flange underside
     lip = a.flange_t is not None
     collar_h = (a.flange_t + 0.3 + LIP_T) if lip else a.collar_h
@@ -210,7 +221,10 @@ if __name__ == "__main__":
     p.add_argument("--front-t", type=float, default=4.0)
     p.add_argument("--floor", type=float, default=1.6, help="plastic under each M2 head (M2x4: 1.6, M2x6: 3)")
     p.add_argument("--probe-x", type=float, default=None, help="probe axis from the M2 face (default: centered)")
-    p.add_argument("--tip-z", type=float, default=0.0, help="probe tip height relative to the old nozzle tip")
+    p.add_argument("--tip-z", type=float, default=-20.0,
+                   help="probe tip height relative to the old nozzle tip (v6: -20; v5 was 0)")
+    p.add_argument("--guide-floor", action=argparse.BooleanOptionalAction, default=True,
+                   help="keep the lower guide no lower than the side leg (v6); --no-guide-floor for v5 placement")
     p.add_argument("--collar-h", type=float, default=3.0, help="collar around the flange (no lip)")
     p.add_argument("--mirror", action=argparse.BooleanOptionalAction, default=True,
                    help="mirror in X (default, v5: the hand that fits the head); --no-mirror for the v4 hand")
@@ -225,6 +239,9 @@ if __name__ == "__main__":
                     ("a5_probe_cap_seat.stl", cap_s)):
         save(to_bed(m), out / name)
     bb = body.bounding_box()
+    t = args.tip_z                                            # heights below are from the TIP
     print(f"body {bb[3]-bb[0]:.1f} x {bb[4]-bb[1]:.1f} x {bb[5]-bb[2]:.1f} mm; probe axis "
-          f"{info['ay']-info['yfo']:.1f} mm in front of the plate; lower guide {info['gz']:.1f} mm "
-          f"above the tip; flange seat {info['fz']:.2f} mm above the tip")
+          f"{info['ay']-info['yfo']:.1f} mm in front of the plate; lower guide {info['gz'] - t:.1f} mm "
+          f"above the tip; flange seat {info['fz'] - t:.2f} mm above the tip")
+    print(f"LOWEST point of the mount: {bb[2] - t:.1f} mm above the tip (set probe.head_h to this, "
+          f"rounded down); tip {-t:.1f} mm below the old nozzle tip")

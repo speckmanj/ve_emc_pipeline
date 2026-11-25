@@ -1,6 +1,10 @@
 """JG Aurora A5 Z endstop trigger spacer, extended so Z homes higher (clears the 50 mm cover).
 
-    .venv\\Scripts\\python cad\\a5_z_spacer.py               60 mm extension
+2026-11-24: default 80 mm (was 60) for probe mount v6, whose tip hangs 20 mm lower; Z must
+home 20 mm higher or G28 Z drives the tip into the cover. Z = 0 then puts the tip where it was.
+The top of Z travel drops by the same 20 mm: z_max 250 -> 230.
+
+    .venv\\Scripts\\python cad\\a5_z_spacer.py               80 mm extension (mount v6)
     .venv\\Scripts\\python cad\\a5_z_spacer.py --ext 55 --mirror
 
 Stock white spacer (Jacob's calipers, 2026-11-16), mounting face up against the Z carriage,
@@ -72,7 +76,7 @@ def spacer(ext: float, mirror: bool, adjust: bool = True) -> m3.Manifold:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ext", type=float, default=60.0)
+    ap.add_argument("--ext", type=float, default=80.0)
     ap.add_argument("--mirror", action="store_true", help="mirror-image part (flange on the other long side)")
     ap.add_argument("--no-adjust", action="store_true")
     a = ap.parse_args()

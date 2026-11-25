@@ -39,7 +39,7 @@ DEFAULTS: dict = {
         "orientation": "x",         # "x": loop plane along printer X, "y": rotated 90 degrees
         "offset_z": 0.0,            # probe tip ABOVE nozzle tip (mm). A5: 0, the tip IS the reference
         "tip_w": 0.0,               # widest tip seen from the side; 0 = TBPS01 table (heightmap.py)
-        "head_h": 20.0,             # probe mount underside above the tip (A5 mount v4: 20.5)
+        "head_h": 40.0,             # probe mount underside above the tip (A5 mount v6: 40.5; v5 was 20.5)
         "head_r": 45.0,             # radius around the probe treated as mount and head
     },
     "printer": {
@@ -52,7 +52,7 @@ DEFAULTS: dict = {
         "url": "",                  # moonraker: http://<ip>:7125
         "bed_x": 300.0,             # travel limits, JG Aurora A5 (A1 mini: 180 x 180 x 150)
         "bed_y": 305.0,
-        "z_max": 250.0,
+        "z_max": 230.0,              # A5 with the 80 mm Z spacer (was 250 with the 60 mm one)
         "z_min": 0.0,               # lowest Z the firmware accepts (A5 raised endstop: 0; A1 mini: -999)
         "has_nozzle": False,        # False: hotend removed, the probe tip is the lowest point (A5)
         "safe_z": 60.0,             # Z for travel moves and at the end (A1 mini: 40)

@@ -24,7 +24,7 @@ tallest_part = 3.0              # only used when the job has no height setup
 name = "H20"                    # H20 / H10 / H5 / E5
 orientation = "x"               # "x": blade along printer X (reads Hy); "y": blade along Y (reads Hx)
 offset_z = 0.0                  # A5: the probe tip IS the reference point (no nozzle)
-head_h = 20.0                   # probe mount v4 underside, 20.5 mm above the tip
+head_h = 40.0                   # probe mount v6 underside, 40.5 mm above the tip (2026-11-24)
 head_r = 45.0
 
 [printer]
@@ -33,7 +33,7 @@ port = "COM15"
 baud = 250000                   # JG Aurora A5, Marlin 1.1.8
 bed_x = 300.0                   # soft limits X -5..305, Y 0..305
 bed_y = 305.0
-z_max = 250.0
+z_max = 230.0                   # 80 mm Z spacer (mount v6): top of travel 20 mm lower
 z_min = 0.0                     # Marlin refuses Z below 0 (raised Z endstop)
 has_nozzle = false
 safe_z = 60.0
