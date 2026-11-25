@@ -21,10 +21,17 @@ if not exist ".venv\Scripts\pythonw.exe" (
 echo Installing packages (the first time takes a few minutes)...
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -e .
 if errorlevel 1 (
+    rem Offline PCs (the scan PC behind its firewall) cannot fetch build tools.
+    rem If the app is already installed, keep it and carry on.
+    ".venv\Scripts\python.exe" -c "import emcscan" 2>nul
+    if errorlevel 1 (
+        echo.
+        echo Package install failed, see above.
+        pause
+        exit /b 1
+    )
     echo.
-    echo Package install failed, see above.
-    pause
-    exit /b 1
+    echo No internet for the package update; the installed packages are kept.
 )
 echo Making shortcuts...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install_shortcut.ps1" -Repo "%~dp0."
